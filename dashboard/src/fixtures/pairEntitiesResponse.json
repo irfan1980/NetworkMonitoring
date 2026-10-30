@@ -1,0 +1,45 @@
+{
+  "from": "1001",
+  "to": "1002",
+  "window": {
+    "seconds": 150
+  },
+  "entities": [
+    {
+      "entity": "ORDER",
+      "pipelineId": "7",
+      "senderFunction": "fn",
+      "senderFormat": "snake_case",
+      "receiverProcedure": "fn",
+      "receiverFormat": "snake_case",
+      "operations": [
+        "Insert",
+        "Update"
+      ],
+      "severity": 2,
+      "pending": 3,
+      "sentInWindow": 1,
+      "appliedInWindow": 1,
+      "errors": 1,
+      "lastSentAt": "2026-10-14T00:00:30Z",
+      "lastAppliedAt": "2026-10-14T00:00:40Z",
+      "lastError": {
+        "at": "2026-10-14T00:01:00Z",
+        "message": "boom",
+        "messageId": "m-1"
+      },
+      "queued": 2
+    }
+  ],
+  "sides": {
+    "from": {
+      "available": true
+    },
+    "to": {
+      "available": true
+    }
+  },
+  "bus": {
+    "available": true
+  }
+}

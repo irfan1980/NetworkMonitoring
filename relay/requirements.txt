@@ -1,0 +1,15 @@
+fastapi>=0.136
+uvicorn>=0.45
+pydantic>=2.12,<3
+httpx>=0.28
+websockets>=15
+pytest>=9.0
+pytest-asyncio>=1.0
+pymysql>=1.1
+psycopg2-binary>=2.9
+pyodbc>=5.3
+psutil>=5.9
+google-auth>=2.49
+requests>=2.32
+croniter>=6.0
+tzdata>=2024.1

@@ -1,0 +1,102 @@
+# ---------------------------------------------------------------------------
+# ServiceBus monorepo: dashboard/ (Expo), relay/ (Python),
+# config_maker/, docs/ (Obsidian). dashboard/.gitignore adds Expo-specific rules.
+# ---------------------------------------------------------------------------
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+.venv/
+venv/
+
+# --- Node / Expo ------------------------------------------------------------
+node_modules/
+dashboard/dist/
+dashboard/.expo/
+.expo/
+.expo-shared/
+web-build/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Logs (keep the .gitkeep placeholders) ---------------------------------
+*.log
+**/logs/*
+!**/logs/.gitkeep
+
+# --- OS / editors -----------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+.history/
+
+# Obsidian: personal workspace layout only; the rest of .obsidian/ may be shared
+.obsidian/workspace*.json
+.trash/
+
+# Claude: personal workspace layout only; the rest of .claude/ may be shared
+.claude/
+config_maker/.claude/
+dashboard/.claude/
+
+
+# --- Runtime state / scratch output ----------------------------------------
+relay/state/*
+!relay/state/.gitkeep
+relay/ws_*capture*.json
+
+# ---------------------------------------------------------------------------
+# SECRETS - every file below carries real credentials (DB passwords, SAS
+# connection strings, relay client secrets, MSSQL SA passwords, Firebase keys).
+# Create them locally; see README "Secrets & config".
+# ---------------------------------------------------------------------------
+
+# env files anywhere (keep value-free *.env.example templates)
+.env
+.env.*
+*.env
+!.env.example
+
+# relay config (live + ad-hoc copies such as "relay_config copy.json")
+relay/config/*.json
+!relay/config/*.example.json
+relay/config/*.plist
+
+# config_maker: input + everything it generates
+config_maker/relay_config.json
+config_maker/configs/
+config_maker/buses/
+config_maker/deploy/
+config_maker/monitor.env
+!config_maker/monitor.env.example
+
+# Firebase client configs
+GoogleService-Info.plist
+google-services*.json
+google-services*.plist
+
+# push: device tokens + Firebase service-account key (project root)
+push_accounts.json
+push_accounts*.json
+firebase-*.json
+**/firebase-*.json
+
+# sql setup scripts (live + ad-hoc copies such as "setup copy.sql")
+config_maker/sql
+
+# Docs
+docs/
+TaskList.md
+./*.json
+relay/.pytest-db.lock
+**/*firebase-adminsdk*.json

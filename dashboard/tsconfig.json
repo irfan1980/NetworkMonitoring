@@ -1,0 +1,14 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    // Lets tsc resolve platform-specific modules (e.g.
+    // src/config/relayCredentials.web.ts / .native.ts, TaskList item 114
+    // follow-up) the same way Metro does at bundle time. tsc only ever
+    // type-checks one resolution per bare import though (it doesn't build
+    // per-platform like Metro does) -- the order here just picks which
+    // platform's file is used for editing/typecheck purposes; both files
+    // export identically-shaped values so it doesn't affect correctness.
+    "moduleSuffixes": [".web", ".ios", ".android", ".native", ""]
+  }
+}

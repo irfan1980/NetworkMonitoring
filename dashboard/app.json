@@ -1,0 +1,98 @@
+{
+  "expo": {
+    "name": "SB Monitoring Dashboard",
+    "slug": "dashboard",
+    "scheme": "sbdashboard",
+    "version": "1.0.0",
+    "orientation": "default",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0d1117",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.servicebusmonitoring.app",
+      "googleServicesFile": "./firebase/google-services-ios.plist",
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "remote-notification"
+        ]
+      },
+      "entitlements": {
+        "aps-environment": "development",
+        "com.apple.developer.usernotifications.time-sensitive": true
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0d1117",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "com.servicebusmonitoring.app",
+      "googleServicesFile": "./firebase/google-services-android.json",
+      "permissions": [
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.VIBRATE",
+        "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro",
+      "output": "single"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-status-bar",
+      [
+        "expo-system-ui",
+        {
+          "userInterfaceStyle": "dark"
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          },
+          "ios": {
+            "useFrameworks": "static"
+          }
+        }
+      ],
+      "@react-native-firebase/app",
+      "@react-native-firebase/messaging",
+      "expo-dev-client",
+      [
+        "expo-notifications",
+        {
+          "mode": "development",
+          "icon": "./assets/android-icon-monochrome.png",
+          "sounds": [
+            "./assets/sounds/sevarity-1/sev1_first.wav",
+            "./assets/sounds/sevarity-1/sev1_repeat.wav",
+            "./assets/sounds/sevarity-2/sev2_first.wav",
+            "./assets/sounds/sevarity-2/sev2_repeat.wav",
+            "./assets/sounds/sevarity-3/sev3_first.wav",
+            "./assets/sounds/sevarity-3/sev3_repeat.wav",
+            "./assets/sounds/sevarity-4/sev4_first.wav",
+            "./assets/sounds/sevarity-4/sev4_repeat.wav",
+            "./assets/sounds/sevarity-5/sev5_first.wav",
+            "./assets/sounds/sevarity-5/sev5_repeat.wav"
+          ]
+        }
+      ],
+      "expo-secure-store"
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "80a7f0e8-c5be-4ff4-bf82-68816e77816d"
+      }
+    },
+    "owner": "tabishalimughal"
+  }
+}
