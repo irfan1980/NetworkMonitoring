@@ -10,11 +10,14 @@ function sameOriginWsUrl(): string | null {
 
 const FALLBACK_WS_URL = 'ws://localhost:8085/ws';
 
-export const RELAY_WS_URL = EXPLICIT_WS_URL || sameOriginWsUrl() || FALLBACK_WS_URL;
+const SAME_ORIGIN_WS_URL = EXPLICIT_WS_URL ? null : sameOriginWsUrl();
+
+export const RELAY_WS_URL = EXPLICIT_WS_URL || SAME_ORIGIN_WS_URL || FALLBACK_WS_URL;
 
 export const RELAY_WS_URL_IS_FALLBACK = !EXPLICIT_WS_URL;
 
-if (RELAY_WS_URL_IS_FALLBACK) {
+// Web same-origin is the intended production path; only warn when the URL is a real guess.
+if (!EXPLICIT_WS_URL && !SAME_ORIGIN_WS_URL) {
   console.warn(
     `[config] EXPO_PUBLIC_RELAY_WS_URL is not set -- falling back to ${RELAY_WS_URL}. ` +
       'Set it in .env/.env.local (or pass it on the export command) to point at the relay explicitly.'

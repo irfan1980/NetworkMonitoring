@@ -356,7 +356,7 @@ def test_scheduler_config_section_is_optional_and_defaulted(write_config, config
         "executor_port": 8095, "relay_ip": "10.101.8.85", "tick_seconds": 1, "health_probe_seconds": 5,
         "health_down_after_misses": 2, "default_timeout_minutes": 0, "default_retries": 0,
         "default_retry_delay_seconds": 60, "default_fail_threshold": 3, "default_run_if_missed": False,
-        "success_exit_codes": [0], "log_keep_days": 90, "log_keep_runs": 1000, "log_output_tail_kb": 64, "extra_allowed_ips": [],
+        "success_exit_codes": [0], "log_keep_days": 90, "log_keep_runs": 1000, "log_output_tail_kb": 64, "log_max_age_days": 30, "extra_allowed_ips": [],
     }
     assert config_dict["machines"][0].get("machine_scheduler") is None
 

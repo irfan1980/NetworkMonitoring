@@ -30,7 +30,6 @@ def bearer_token(headers, query_params) -> tuple[Optional[str], str]:
 
 
 def authenticate(app_state, token: Optional[str]):
-    app_state.sync_accounts_path()
     return app_state.sessions.verify(token)
 
 

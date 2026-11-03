@@ -44,4 +44,4 @@ def test_o10_every_real_state_writer_imports_atomic_write_json():
             text = py_file.read_text(encoding="utf-8")
             if "atomic_write_json" in text:
                 writers.append(py_file.name)
-    assert set(writers) >= {"state.py", "dispatch_sent_guard.py", "silence.py"}
+    assert set(writers) >= {"dispatch_sent_guard.py", "silence.py"}

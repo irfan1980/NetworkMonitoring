@@ -9,6 +9,7 @@ from _scheduler.inflight import InflightStore
 from _scheduler.utc import iso
 
 from .conftest import SCRIPT
+from tests._state_helpers import read_doc
 
 
 def raw_config_update(harness, **scheduler):
@@ -388,7 +389,7 @@ async def test_inflight_run_is_resumed_and_recorded_after_a_restart(harness):
     await harness.until(lambda: f"{dispatched.run_id}-1" in harness.endpoint.runs)
     await harness.loop.shutdown()
     assert harness.runs(schedule.id) == []
-    saved = json.loads((harness.state_dir / "scheduler" / "inflight.json").read_text())
+    saved = read_doc(harness.state_dir, "scheduler/inflight")
     assert [r["run_id"] for r in saved["runs"]] == [dispatched.run_id]
 
     endpoint_id = f"{dispatched.run_id}-1"
@@ -400,7 +401,7 @@ async def test_inflight_run_is_resumed_and_recorded_after_a_restart(harness):
     rows = harness.runs(schedule.id)
     assert len(rows) == 1 and rows[0]["run_id"] == dispatched.run_id and rows[0]["outcome"] == "success"
     assert not any(r.url.path == "/runs" and r.method == "POST" and json.loads(r.content)["run_id"] != endpoint_id for r in harness.endpoint.requests)
-    assert json.loads((harness.state_dir / "scheduler" / "inflight.json").read_text())["runs"] == []
+    assert read_doc(harness.state_dir, "scheduler/inflight")["runs"] == []
     await restarted.shutdown()
 
 
@@ -485,7 +486,7 @@ async def test_waiting_flag_is_not_persisted(harness):
     await harness.until(lambda: f"{dispatched.run_id}-1" in harness.endpoint.runs)
     harness.endpoint.down = True
     await harness.until(lambda: harness.loop.is_waiting(schedule.id))
-    saved = json.loads((harness.state_dir / "scheduler" / "inflight.json").read_text())
+    saved = read_doc(harness.state_dir, "scheduler/inflight")
     assert "waiting" not in saved["runs"][0]
     await harness.loop.shutdown()
 
@@ -528,7 +529,7 @@ async def test_stop_kills_through_the_endpoint_and_logs_cancelled(harness):
     row = harness.runs(schedule.id)[0]
     assert (row["outcome"], row["reason"], row["run_id"]) == ("cancelled", "stopped by user", dispatched.run_id)
     assert not harness.loop.is_running(schedule.id)
-    assert json.loads((harness.state_dir / "scheduler" / "inflight.json").read_text())["runs"] == []
+    assert read_doc(harness.state_dir, "scheduler/inflight")["runs"] == []
 
 
 async def test_stop_abandons_when_the_endpoint_is_unreachable(harness):
@@ -540,7 +541,7 @@ async def test_stop_abandons_when_the_endpoint_is_unreachable(harness):
     row = harness.runs(schedule.id)[0]
     assert row["outcome"] == "cancelled"
     assert row["reason"].startswith("abandoned while endpoint unreachable (script may still be running on the machine")
-    assert json.loads((harness.state_dir / "scheduler" / "inflight.json").read_text())["runs"] == []
+    assert read_doc(harness.state_dir, "scheduler/inflight")["runs"] == []
     harness.endpoint.down = False
     await asyncio.sleep(0.1)
     assert len(harness.runs(schedule.id)) == 1

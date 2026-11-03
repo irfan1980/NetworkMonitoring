@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 
 import httpx
@@ -14,16 +15,28 @@ from _push.fcm import FcmClient
 from _push.sources import active_alerts
 from main import create_app
 
+from _state.database import Database
+from tests._accounts_helpers import set_accounts
+
 from .conftest import FakeClock, FakeFcm, alert, device
 
 
 def _accounts(tmp_path, accounts=None):
+    """A legacy accounts file; create_app imports it once through settings.push.accounts_file."""
     path = tmp_path / "push_accounts.json"
     path.write_text(json.dumps(accounts if accounts is not None else [
         {"account_secret": "1111", "name": "Ops", "min_severity": 2, "device_codes": []},
         {"account_secret": "2222", "name": "Boss", "min_severity": 5, "device_codes": []},
     ]))
     return path
+
+
+def _store(tmp_path, accounts=None) -> AccountStore:
+    set_accounts(tmp_path / "state", accounts if accounts is not None else [
+        {"account_secret": "1111", "name": "Ops", "min_severity": 2, "device_codes": []},
+        {"account_secret": "2222", "name": "Boss", "min_severity": 5, "device_codes": []},
+    ])
+    return AccountStore(Database.for_dir(tmp_path / "state"))
 
 
 @pytest.fixture
@@ -135,34 +148,38 @@ def test_mute_needs_an_active_alert_and_an_id(client, app):
     assert client.post("/api/push/mute", headers=ops, json={}).status_code == 422
 
 
-def test_accounts_file_with_string_device_codes_is_normalised(tmp_path):
+def test_legacy_accounts_with_string_device_codes_are_normalised_on_import(tmp_path):
     path = _accounts(tmp_path, [{"account_secret": "s", "name": "N", "min_severity": 3, "device_codes": ["plain-token"]}])
-    [device_entry] = AccountStore(path).accounts()[0]["device_codes"]
+    db = Database.for_dir(tmp_path / "state", accounts_file=path)
+    [device_entry] = AccountStore(db).accounts()[0]["device_codes"]
     assert device_entry["token"] == "plain-token" and device_entry["platform"] == "android"
 
 
-def test_missing_accounts_file_means_no_accounts_and_every_secret_is_refused(tmp_path):
-    store = AccountStore(tmp_path / "absent.json")
+def test_no_accounts_means_every_secret_is_refused(tmp_path):
+    store = AccountStore(Database.for_dir(tmp_path / "state"))
     assert store.accounts() == [] and store.find_by_secret("1111") is None and store.register("1111", "t", "web", "d") is None
-    assert not (tmp_path / "absent.json").exists()
 
 
-def test_a_corrupt_accounts_file_keeps_the_last_good_copy_and_refuses_writes(tmp_path):
+def test_a_read_failure_keeps_the_last_good_copy_and_a_write_failure_is_reported(tmp_path, monkeypatch):
+    import sqlite3
+
     from _push.accounts import AccountsFileError
 
-    path = _accounts(tmp_path)
-    store = AccountStore(path)
+    store = _store(tmp_path)
     assert len(store.accounts()) == 2
-    path.write_text("{oops")
+
+    def broken(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(store._db, "read", broken)
     assert len(store.accounts()) == 2
+    monkeypatch.setattr(store._db, "write", broken)
     with pytest.raises(AccountsFileError):
         store.register("1111", "t", "web", "d")
-    assert path.read_text() == "{oops"
 
 
 def test_concurrent_registrations_never_lose_entries(tmp_path):
-    path = _accounts(tmp_path)
-    store = AccountStore(path)
+    store = _store(tmp_path)
     errors = []
 
     def work(index: int):
@@ -176,20 +193,20 @@ def test_concurrent_registrations_never_lose_entries(tmp_path):
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert not errors
-    stored = [d["token"] for a in json.loads(path.read_text()) for d in a["device_codes"]]
+    stored = [d["token"] for a in store.accounts() for d in a["device_codes"]]
     assert sorted(stored) == sorted(f"t{i}-{n}" for i in range(4) for n in range(15))
 
 
 def test_owner_edits_survive_a_register_and_are_visible_without_restart(tmp_path):
-    path = _accounts(tmp_path)
-    store = AccountStore(path)
+    store = _store(tmp_path)
     store.register("1111", "t1", "web", "d")
-    raw = json.loads(path.read_text())
-    raw.append({"account_secret": "3333", "name": "Added", "min_severity": 1, "device_codes": []})
-    path.write_text(json.dumps(raw))
+    other = sqlite3.connect(str(tmp_path / "state" / "relay_state.db"))  # the operator, from another connection
+    other.execute("INSERT INTO user_accounts VALUES ('3333', 'Added', 1)")
+    other.commit()
+    other.close()
     assert store.find_by_secret("3333")["name"] == "Added"
     store.register("3333", "t2", "ios", "d")
-    names = {a["name"]: [d["token"] for d in a["device_codes"]] for a in json.loads(path.read_text())}
+    names = {a["name"]: [d["token"] for d in a["device_codes"]] for a in store.accounts()}
     assert names == {"Ops": ["t1"], "Boss": [], "Added": ["t2"]}
 
 
@@ -206,7 +223,7 @@ async def test_every_alert_source_reaches_the_dispatcher(tmp_path, write_config,
     dispatcher = PushDispatcher(
         app.state.config_store, tmp_path / "pushstate", lambda: active_alerts(app.state, app.state.config_store.get()),
         fcm_factory=lambda path: FcmClient(path, http_client=httpx.Client(transport=httpx.MockTransport(fcm.handler)), token_provider=lambda: "t"),
-        clock=clock,
+        clock=clock, accounts=app.state.accounts,
     )
     app.state.machine_alert_incidents.claim(AlertKey("machine", "4"), {"machine_id": 4, "severity": 2})
     app.state.pipeline_alert_incidents.claim(AlertKey("pipeline", "4002:4"), {"pipeline_id": "4002:4", "severity": 3})
@@ -244,7 +261,7 @@ def test_config_issues_for_push_are_computed_from_the_files():
     raw["settings"]["push"] = {"enabled": True, "accounts_file": "/nowhere/accounts.json", "service_account_file": "/nowhere/key.json"}
     issues = {i.code: i for i in compute_config_issues(RelayConfig.model_validate(raw))}
     assert issues["push_service_account_missing"].severity == "warning"
-    assert issues["push_accounts_file_missing"].severity == "info"
+    assert "push_no_accounts" not in issues  # without a state dir the relay does not open any database for this check
     raw["settings"]["push"]["enabled"] = False
     assert not [i for i in compute_config_issues(RelayConfig.model_validate(raw)) if i.code.startswith("push_")]
 
@@ -257,22 +274,27 @@ def test_push_settings_defaults():
     assert push.accounts_file == "" and push.service_account_file == "config/firebase-service-account.json"
 
 
-def test_default_accounts_file_lives_under_the_state_dir(write_config, config_dict, tmp_path):
-    app = create_app(write_config(config_dict), state_dir=tmp_path / "somestate")
-    assert app.state.accounts.path == (tmp_path / "somestate" / "auth" / "push_accounts.json").resolve()
+def test_a_legacy_accounts_file_in_the_default_place_is_imported_once(write_config, config_dict, tmp_path):
+    state = tmp_path / "somestate"
+    (state / "auth").mkdir(parents=True)
+    (state / "auth" / "push_accounts.json").write_text(json.dumps([{"account_secret": "abc", "name": "Old", "min_severity": 3, "device_codes": []}]))
+    app = create_app(write_config(config_dict), state_dir=state)
+    assert [(a["name"], a["min_severity"]) for a in app.state.accounts.accounts()] == [("Old", 3)]
 
 
-def test_config_check_names_the_default_accounts_path_in_the_message():
+def test_config_check_reports_an_empty_user_accounts_table(tmp_path):
     from _contract.schema import RelayConfig
     from config_issues import compute_config_issues
-    from pathlib import Path
 
     from ..conftest import make_config_dict
 
     raw = make_config_dict()
     raw["settings"]["push"] = {"enabled": True, "service_account_file": "/nowhere/key.json"}
-    issues = {i.code: i for i in compute_config_issues(RelayConfig.model_validate(raw), None, Path("/state-x"))}
-    assert "push_accounts.json" in issues["push_accounts_file_missing"].message and "auth" in issues["push_accounts_file_missing"].message
+    config = RelayConfig.model_validate(raw)
+    issues = {i.code: i for i in compute_config_issues(config, None, tmp_path / "s")}
+    assert "user_accounts" in issues["push_no_accounts"].message
+    set_accounts(tmp_path / "s", [{"account_secret": "x", "name": "n", "min_severity": 5}])
+    assert "push_no_accounts" not in {i.code for i in compute_config_issues(config, None, tmp_path / "s")}
 
 
 class _ConfirmHarness:

@@ -56,13 +56,14 @@ def device(token: str, platform: str = "android") -> dict:
 def alert(alert_id: str = "machine:4", severity: int = 2, reason: str = "machine 4 is offline", kind: str = "machine") -> dict:
     return {"alertId": alert_id, "kind": kind, "severity": severity, "reason": reason}
 
+from tests._accounts_helpers import get_accounts, set_accounts  # noqa: E402
+
 
 class PushHarness:
     def __init__(self, tmp_path: Path, config_dict: dict):
         self.tmp = tmp_path
         self.clock = FakeClock()
         self.fcm = FakeFcm()
-        self.accounts_path = tmp_path / "push_accounts.json"
         self.key_path = tmp_path / "firebase-service-account.json"
         self.key_path.write_text(json.dumps({"project_id": "demo-project"}))
         self.write_accounts([
@@ -70,7 +71,7 @@ class PushHarness:
             {"account_secret": "2222", "name": "Boss", "min_severity": 5, "device_codes": [device("boss-1", "ios")]},
         ])
         config_dict["settings"]["push"] = {
-            "enabled": True, "accounts_file": str(self.accounts_path), "service_account_file": str(self.key_path),
+            "enabled": True, "service_account_file": str(self.key_path),
             "grace_seconds": 15, "min_interval_seconds": 120, "dashboard_url": "http://localhost:8081",
         }
         config_path = tmp_path / "relay_config.json"
@@ -81,10 +82,10 @@ class PushHarness:
         self.dispatcher = self.new_dispatcher()
 
     def write_accounts(self, accounts: list[dict]) -> None:
-        self.accounts_path.write_text(json.dumps(accounts, indent=2))
+        set_accounts(self.tmp / "state", accounts)
 
     def read_accounts(self) -> list[dict]:
-        return json.loads(self.accounts_path.read_text())
+        return get_accounts(self.tmp / "state")
 
     def fcm_factory(self, path: Path) -> FcmClient:
         return FcmClient(path, http_client=httpx.Client(transport=httpx.MockTransport(self.fcm.handler)), token_provider=lambda: "access-token")

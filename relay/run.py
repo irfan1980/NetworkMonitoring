@@ -44,7 +44,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="run.py",
         description=f"Start the relay. It reads exactly one config file, {CONFIG_PATH} (override with RELAY_CONFIG); "
-        "edit that file rather than passing a path.",
+        "edit that file rather than passing a path. While that file is missing the relay runs on the blank "
+        "config/relay_config.example.json and switches to it as soon as it appears.",
     )
     parser.add_argument(
         "--no-log",
@@ -101,10 +102,42 @@ def _serve(args, file_logging, real_stdout, real_stderr) -> int:
         print(f"import error: {exc!r}", file=real_stderr)
         return 1
 
+    from _lib.config_fallback import FALLBACK_CONFIG_PATH, MainConfigWatcher, uses_fallback
+
+    while True:
+        code, switch = _run_once(
+            args, file_logging, status, fatal, create_app, StartupConfigError,
+            FALLBACK_CONFIG_PATH, MainConfigWatcher, uses_fallback,
+        )
+        if not switch:
+            return code
+        logger.warning("restarting the relay on %s", CONFIG_PATH)
+
+
+def _run_once(args, file_logging, status, fatal, create_app, StartupConfigError, fallback_path, watcher_cls, uses_fallback):
+    import shutil
+    import tempfile
+    import threading
+
+    fallback = uses_fallback(CONFIG_PATH)
+    config_path = fallback_path if fallback else CONFIG_PATH
+    state_dir = None
+    if fallback:
+        # throwaway state: the real state dir and its one-time file import must stay untouched until the main config exists
+        state_dir = tempfile.mkdtemp(prefix="relay-fallback-state-")
+        logger.warning(
+            "RUNNING ON THE FALLBACK CONFIG %s because %s does not exist: no machines or databases are monitored, nobody can "
+            "log in, nothing is saved. The relay switches to %s by itself once that file is valid.",
+            fallback_path, CONFIG_PATH, CONFIG_PATH,
+        )
     try:
-        app = create_app(CONFIG_PATH, log_queue=file_logging.queue)
+        app = create_app(config_path, state_dir=state_dir, log_queue=file_logging.queue, fallback_config=fallback)
+        file_logging.set_retention_source(lambda: app.state.config_store.get().settings.log_retention_days)
+        file_logging.prune()
     except StartupConfigError as exc:
-        return fatal(f"refusing to start: {exc}")
+        if state_dir:
+            shutil.rmtree(state_dir, ignore_errors=True)
+        return fatal(f"refusing to start: {exc}"), False
 
     import uvicorn
     import uvicorn.config
@@ -119,6 +152,16 @@ def _serve(args, file_logging, real_stdout, real_stderr) -> int:
         log_config=log_config,
         timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
     ))
+
+    switch = threading.Event()
+    watcher = None
+    if fallback:
+        def on_ready() -> None:
+            switch.set()
+            server.should_exit = True
+
+        watcher = watcher_cls(CONFIG_PATH, on_ready)
+        watcher.start()
 
     reporter = None
     if status is not None:
@@ -135,8 +178,16 @@ def _serve(args, file_logging, real_stdout, real_stderr) -> int:
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 1
     finally:
+        if watcher is not None:
+            watcher.stop()
         if reporter is not None:
             reporter.stop()
+        if state_dir:
+            del app
+            shutil.rmtree(state_dir, ignore_errors=True)
+
+    if switch.is_set():
+        return 0, True
 
     if status is not None:
         if server.started:
@@ -146,7 +197,7 @@ def _serve(args, file_logging, real_stdout, real_stderr) -> int:
         else:
             where = f" (details in {file_logging.error.current_path()})"
             code = fatal(f"relay failed to start on {config.settings.bind_host}:{config.settings.port}{where}")
-    return code
+    return code, False
 
 
 if __name__ == "__main__":

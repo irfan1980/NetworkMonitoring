@@ -12,6 +12,7 @@ from _push.schedule_window import WindowError, is_active, parse_schedule
 from _push.sources import alert_scopes
 
 from .conftest import alert, device
+from tests._state_helpers import read_doc
 
 
 def epoch(year, month, day, hour, minute, tz) -> float:
@@ -198,7 +199,7 @@ async def test_sent_state_persists_across_restart_without_resend(push):
     await push.dispatcher.tick()
     await push.run(16)
     sent = len(push.fcm.requests)
-    state = json.loads((push.tmp / "state" / "push" / "state.json").read_text())
+    state = read_doc(push.tmp / "state", "push/state")
     assert set(state["alerts"]["machine:4"]["sent"]) == {account_key("1111"), account_key("2222")}
     push.dispatcher = push.new_dispatcher()
     await push.run(60)
@@ -254,8 +255,7 @@ def test_downtime_persists_and_reloads(tmp_path):
     store = DowntimeStore(tmp_path)
     created = store.create(window(note="patching"))
     assert DowntimeStore(tmp_path).list() == [created]
-    assert json.loads((tmp_path / "push" / "downtime.json").read_text()) == {"windows": [created]}
-    assert not list((tmp_path / "push").glob("*.tmp"))
+    assert read_doc(tmp_path, "push/downtime") == {"windows": [created]}
 
 
 @pytest.mark.parametrize("patch", [
@@ -386,3 +386,58 @@ async def test_sends_and_suppressions_are_logged_once_per_transition_without_tok
     assert window_id not in " ".join(reasons)
     await push.run(5)
     assert len([m for m in _push_logs(caplog) if "downtime window" in m]) == 2
+
+
+def _all_kinds(push) -> list[tuple[str, str]]:
+    return [(r["body"]["message"]["data"]["alertId"], r["body"]["message"]["data"]["kind"])
+            for r in push.fcm.requests if r["body"]["message"]["token"] == "ops-1"]
+
+
+async def _notified(push, alerts):
+    push.alerts = alerts
+    await push.dispatcher.tick()
+    await push.run(16)
+    push.fcm.requests.clear()
+
+
+async def test_a_long_stop_does_not_make_every_alert_repeat_at_once(push):
+    alerts = [alert(f"machine:{n}", severity=2) for n in (4, 5, 6)]
+    await _notified(push, alerts)
+    push.clock.advance(10 * 86400)
+    push.dispatcher = push.new_dispatcher()
+    await push.run(180)
+    assert _all_kinds(push) == []
+    await push.run(15 * 60)
+    assert sorted(_all_kinds(push)) == [(f"machine:{n}", "repeat") for n in (4, 5, 6)]
+
+
+async def test_an_alert_never_notified_still_gets_its_first_push_after_a_long_stop(push):
+    await _notified(push, [alert("machine:4")])
+    push.clock.advance(10 * 86400)
+    push.dispatcher = push.new_dispatcher()
+    push.alerts = [alert("machine:4"), alert("machine:9", reason="new problem")]
+    await push.run(30)
+    assert _all_kinds(push) == [("machine:9", "first")]
+
+
+async def test_a_short_restart_keeps_a_repeat_that_was_due(push):
+    await _notified(push, [alert("machine:4")])
+    push.clock.advance(20 * 60)
+    push.dispatcher = push.new_dispatcher()
+    await push.run(5)
+    assert _all_kinds(push) == [("machine:4", "repeat")]
+
+
+async def test_rebaseline_uses_the_acknowledged_interval(push):
+    await _notified(push, [alert("machine:4")])
+    push.clock.advance(50 * 60)
+    push.dispatcher = push.new_dispatcher()
+    push.dispatcher.acks.acknowledge("machine:4", "Ops")
+    await push.run(5)
+    assert _all_kinds(push) == [("machine:4", "repeat")]  # 50 min < 2 x 30 min: a legitimate short outage
+    push.fcm.requests.clear()
+    push.clock.advance(70 * 60)
+    push.dispatcher = push.new_dispatcher()
+    push.dispatcher.acks.acknowledge("machine:4", "Ops")
+    await push.run(5)
+    assert _all_kinds(push) == []  # 70 min >= 2 x 30 min: missed while down, re-baselined

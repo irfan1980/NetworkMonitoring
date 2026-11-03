@@ -25,7 +25,6 @@ async def login(request: Request, body: dict = Body(...)):
     key = f"login:{request.client.host if request.client else 'unknown'}"
     if limiter.is_locked(key):
         return _err(429, "rate_limited", "too many wrong account secrets, try again later")
-    state.sync_accounts_path()
     account = state.push.accounts.find_by_secret(secret)
     if account is None:
         limiter.record_failure(key)

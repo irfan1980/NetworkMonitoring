@@ -7,18 +7,17 @@ from typing import Callable, Optional
 
 from pydantic import ValidationError
 
-from _lib.atomic_write import atomic_write_json
 from _scheduler.model import Schedule, ScheduleInput
+from _state.database import Database
+from _state.importer import META_NEXT_SCHEDULE_ID
 
 logger = logging.getLogger("relay.scheduler.store")
-
-SCHEDULES_FILE = ("scheduler", "schedules.json")
 
 
 class ScheduleStore:
 
     def __init__(self, state_dir: Path | str):
-        self._state_dir = Path(state_dir)
+        self._db = Database.for_dir(state_dir)
         self._schedules: dict[int, Schedule] = {}
         self._next_id = 1
         self._listeners: list[Callable[[], None]] = []
@@ -29,36 +28,26 @@ class ScheduleStore:
         self._next_id = 1
         self._load()
 
-    def _path(self) -> Path:
-        return self._state_dir.joinpath(*SCHEDULES_FILE)
-
     def _load(self) -> None:
-        path = self._path()
-        if not path.exists():
-            return
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            schedules = [Schedule.model_validate(item) for item in raw.get("schedules", [])]
-        except (OSError, json.JSONDecodeError, ValidationError, AttributeError) as exc:
-            backup = path.with_suffix(".corrupt")
-            logger.error("schedules file unreadable (%s); moved to %s and starting empty", exc, backup)
-            try:
-                path.replace(backup)
-            except OSError:
-                pass
-            return
+            schedules = [Schedule.model_validate_json(body) for (body,) in self._db.query("SELECT body FROM schedules ORDER BY id")]
+            row = self._db.query("SELECT value FROM meta WHERE key=?", (META_NEXT_SCHEDULE_ID,))
+            declared = int(row[0][0]) if row else 1
+        except (ValidationError, ValueError) as exc:
+            raise RuntimeError(f"schedules in {self._db.path} are unreadable: {exc}") from exc
         self._schedules = {s.id: s for s in schedules}
-        self._next_id = max(int(raw.get("next_id", 1)), max(self._schedules, default=0) + 1)
+        self._next_id = max(declared, max(self._schedules, default=0) + 1)
 
     def _save(self) -> None:
-        atomic_write_json(
-            self._state_dir,
-            *SCHEDULES_FILE,
-            data={
-                "next_id": self._next_id,
-                "schedules": [s.model_dump(mode="json") for s in self.list()],
-            },
-        )
+        rows = [(s.id, json.dumps(s.model_dump(mode="json"))) for s in self.list()]
+        next_id = self._next_id
+
+        def apply(conn) -> None:
+            conn.execute("DELETE FROM schedules")
+            conn.executemany("INSERT INTO schedules(id, body) VALUES (?, ?)", rows)
+            conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (META_NEXT_SCHEDULE_ID, str(next_id)))
+
+        self._db.write(apply)
         for listener in list(self._listeners):
             listener()
 

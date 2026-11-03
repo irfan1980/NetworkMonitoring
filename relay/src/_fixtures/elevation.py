@@ -72,7 +72,7 @@ def is_process_running(cmdline_substring: str) -> bool:
     for proc in psutil.process_iter(["cmdline"]):
         try:
             cmdline = proc.info.get("cmdline") or []
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except (psutil.NoSuchProcess, psutil.AccessDenied, ProcessLookupError):
             continue
         joined = " ".join(cmdline).lower()
         if needle in joined:

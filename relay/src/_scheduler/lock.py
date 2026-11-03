@@ -32,7 +32,7 @@ def _holder_alive(info: dict) -> bool:
         started = proc.create_time()
         if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
             return False
-    except psutil.Error:
+    except (psutil.Error, ProcessLookupError):
         return False
     recorded = info.get("create_time")
     if recorded is None:

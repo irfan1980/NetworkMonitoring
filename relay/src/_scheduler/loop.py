@@ -35,6 +35,7 @@ CHECK_TIMEOUT_SECONDS = 2.0
 NOT_STARTED_OUTCOMES = frozenset({"missed", "skipped_locked"})
 MAX_POLL_BACKOFF_SECONDS = 30
 LAST_TICK_SAVE_SECONDS = 15
+PURGE_INTERVAL_SECONDS = 24 * 3600
 
 
 @dataclass
@@ -92,6 +93,8 @@ class SchedulerLoop:
         self._started_at: Optional[datetime] = None
         self._last_tick_saved = 0.0
         self._running = False
+        self._next_purge = 0.0
+        self._purge_tasks: set = set()
 
     @property
     def _settings(self):
@@ -175,11 +178,28 @@ class SchedulerLoop:
         self._activate()
         return True
 
+    def _purge_history(self) -> None:
+        try:
+            removed = self._runlog.purge_expired(self._settings.log_max_age_days, protected_run_ids=list(self.active))
+            if removed:
+                logger.info("run history: deleted %d run(s) older than %d days", removed, self._settings.log_max_age_days)
+        except Exception as exc:
+            logger.warning("run history cleanup failed (will retry tomorrow): %s", exc)
+
+    def _maybe_purge(self) -> None:
+        if not self.enabled or time.monotonic() < self._next_purge:
+            return
+        self._next_purge = time.monotonic() + PURGE_INTERVAL_SECONDS
+        task = asyncio.get_running_loop().run_in_executor(None, self._purge_history)
+        self._purge_tasks.add(task)
+        task.add_done_callback(self._purge_tasks.discard)
+
     async def run_forever(self) -> None:
         self._running = True
         self.start()
         while self._running:
             try:
+                self._maybe_purge()
                 await self.tick()
             except Exception:
                 logger.exception("scheduler tick failed")

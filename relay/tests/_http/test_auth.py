@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from _lib.log_redact import RedactWsSecretFilter
 from _push.accounts import AccountStore
+from tests._accounts_helpers import get_accounts, set_accounts
 from _session.store import SessionStore, hash_token
 from main import create_app
 
@@ -90,10 +91,15 @@ def test_login_validates_the_body(client, body):
 
 def test_only_the_token_hash_is_stored_never_the_token_or_the_secret(client, tmp_path):
     resp = login(client)
-    raw = (tmp_path / "state" / "auth" / "sessions.json").read_text()
+    from tests._state_helpers import dump_state_text
+
+    raw = dump_state_text(tmp_path / "state")
     token = resp.json()["token"]
     assert token not in raw and "1111" not in raw
-    record = json.loads(raw)["sessions"][0]
+    cols = ("hash", "account", "account_key", "device_name", "platform", "created_at", "last_used_at", "expires_at", "push_token", "device_id")
+    from _state.database import Database
+
+    record = dict(zip(cols, Database.for_dir(tmp_path / "state").query(f"SELECT {', '.join(cols)} FROM sessions")[0]))
     assert record["hash"] == hash_token(token)
     assert {"hash", "account", "device_name", "platform", "created_at", "last_used_at", "expires_at"} <= set(record)
     assert record["account"] == "Ops" and record["device_name"] == "Pixel" and record["platform"] == "android"
@@ -118,29 +124,28 @@ def test_logout_also_unregisters_the_push_token_registered_through_the_session(c
     assert tokens == {"tok-2"}
 
 
-def test_removing_an_account_invalidates_its_sessions_on_next_use(client, accounts_path):
+def test_removing_an_account_invalidates_its_sessions_on_next_use(client, tmp_path):
     ops, boss = bearer(login(client, "1111")), bearer(login(client, "2222"))
-    raw = json.loads(accounts_path.read_text())
-    accounts_path.write_text(json.dumps([a for a in raw if a["name"] != "Ops"]))
+    set_accounts(tmp_path / "state", [a for a in get_accounts(tmp_path / "state") if a["name"] != "Ops"])
     assert client.get("/api/auth/me", headers=ops).status_code == 401
     assert client.get("/api/auth/me", headers=boss).status_code == 200
 
 
-def test_changing_an_accounts_secret_invalidates_its_sessions(client, accounts_path):
+def test_changing_an_accounts_secret_invalidates_its_sessions(client, tmp_path):
     ops = bearer(login(client, "1111"))
-    raw = json.loads(accounts_path.read_text())
+    raw = get_accounts(tmp_path / "state")
     raw[0]["account_secret"] = "9999"
-    accounts_path.write_text(json.dumps(raw))
+    set_accounts(tmp_path / "state", raw)
     assert client.get("/api/auth/me", headers=ops).status_code == 401
     assert login(client, "1111").status_code == 401
     assert login(client, "9999").status_code == 200
 
 
-def test_min_severity_changes_in_the_file_show_up_without_a_new_login(client, accounts_path):
+def test_min_severity_changes_in_the_database_show_up_without_a_new_login(client, tmp_path):
     ops = bearer(login(client, "1111"))
-    raw = json.loads(accounts_path.read_text())
+    raw = get_accounts(tmp_path / "state")
     raw[0]["min_severity"] = 4
-    accounts_path.write_text(json.dumps(raw))
+    set_accounts(tmp_path / "state", raw)
     assert client.get("/api/auth/me", headers=ops).json()["min_severity"] == 4
 
 
@@ -210,7 +215,10 @@ def test_sessions_survive_a_relay_restart(tmp_path, accounts_path, write_config,
 
 
 def _store(tmp_path, accounts_path, clock):
-    accounts = AccountStore(accounts_path)
+    from _state.database import Database
+
+    set_accounts(tmp_path / "state", json.loads(accounts_path.read_text()))
+    accounts = AccountStore(Database.for_dir(tmp_path / "state"))
     return SessionStore(tmp_path / "state", lambda: accounts, clock=clock), accounts
 
 

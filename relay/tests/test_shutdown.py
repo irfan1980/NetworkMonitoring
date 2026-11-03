@@ -22,10 +22,19 @@ PING_GRACE_SECONDS = 4
 AUTH = {"web_client_id": "w", "web_client_secret": "ws", "app_client_id": "a", "app_client_secret": "as"}
 
 
+def _is_alive(pid: int) -> bool:
+    # a process can exit between any two psutil calls; psutil reports that as NoSuchProcess, but on Windows the raw
+    # ProcessLookupError from the native call can escape, and both mean "already gone"
+    try:
+        return psutil.pid_exists(pid) and psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except (psutil.Error, ProcessLookupError):
+        return False
+
+
 def _wait_gone(pids: list[int], grace: float) -> list[int]:
     deadline = time.time() + grace
     while True:
-        alive = [p for p in pids if psutil.pid_exists(p) and psutil.Process(p).status() != psutil.STATUS_ZOMBIE]
+        alive = [p for p in pids if _is_alive(p)]
         if not alive or time.time() >= deadline:
             return alive
         time.sleep(0.2)
@@ -61,7 +70,7 @@ def _login(port: int) -> str:
 def _open_ws(port: int, path: str):
     from websockets.sync.client import connect
 
-    ws = connect(f"ws://127.0.0.1:{port}{path}?token={_login(port)}", open_timeout=5)
+    ws = connect(f"ws://127.0.0.1:{port}{path}?token={_login(port)}", open_timeout=5, legacy=True)
     ws.send(json.dumps({"type": "hello", "device": "d", "clientId": "c"}))
     ws.recv(timeout=10)
     return ws
@@ -88,7 +97,10 @@ def test_ctrl_c_stops_the_relay_quickly_with_ws_clients_children_and_a_hung_db(t
     accounts = tmp_path / "state" / "auth" / "push_accounts.json"
     accounts.parent.mkdir(parents=True)
     accounts.write_text(json.dumps([{"account_secret": "1111", "name": "Ops", "min_severity": 5, "device_codes": []}]))
-    env = {**os.environ, "RELAY_CONFIG": str(config_path), "RELAY_STATE_DIR": str(tmp_path / "state"), "PYTHONUNBUFFERED": "1"}
+    env = {
+        **os.environ, "RELAY_CONFIG": str(config_path), "RELAY_STATE_DIR": str(tmp_path / "state"),
+        "RELAY_LOG_DIR": str(tmp_path / "logs"), "PYTHONUNBUFFERED": "1",
+    }
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
     log = (tmp_path / "relay.log").open("w")
     proc = subprocess.Popen(
@@ -115,7 +127,7 @@ def test_ctrl_c_stops_the_relay_quickly_with_ws_clients_children_and_a_hung_db(t
         for o in orphans:
             try:
                 detail.append((o, psutil.Process(o).cmdline()[-3:]))
-            except psutil.Error:
+            except (psutil.Error, ProcessLookupError):
                 detail.append((o, "gone"))
         assert not orphans, f"orphan processes after shutdown: {detail}"
         assert elapsed < EXIT_CAP_SECONDS
@@ -126,8 +138,14 @@ def test_ctrl_c_stops_the_relay_quickly_with_ws_clients_children_and_a_hung_db(t
             except Exception:
                 pass
         if proc.poll() is None:
-            for child in psutil.Process(proc.pid).children(recursive=True):
-                child.kill()
+            try:
+                for child in psutil.Process(proc.pid).children(recursive=True):
+                    try:
+                        child.kill()
+                    except (psutil.Error, ProcessLookupError):
+                        pass
+            except (psutil.Error, ProcessLookupError):
+                pass
             proc.kill()
         log.close()
         db.close()

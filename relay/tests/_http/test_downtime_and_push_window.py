@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from main import create_app
 
 from ..conftest import TEST_TOKEN, make_database_node
+from tests._state_helpers import read_doc
 
 AUTH = {"Authorization": f"Bearer {TEST_TOKEN}"}
 
@@ -40,7 +41,7 @@ def test_downtime_crud_round_trip_and_persistence(client):
     assert updated.status_code == 200 and updated.json()["id"] == body["id"] and updated.json()["service"] == "db-a"
     assert client.get("/api/downtime", headers=AUTH).json()["windows"][0]["days"] == [3]
 
-    saved = json.loads((client.app.state.state_dir / "push" / "downtime.json").read_text())
+    saved = read_doc(client.app.state.state_dir, "push/downtime")
     assert saved["windows"][0]["id"] == body["id"]
 
     assert client.delete(f"/api/downtime/{body['id']}", headers=AUTH).status_code == 200
@@ -67,7 +68,9 @@ def test_account_window_get_put_clear(client):
     put = client.put("/api/push/window", headers=AUTH, json=ACCOUNT_WINDOW)
     assert put.status_code == 200 and put.json() == {"window": ACCOUNT_WINDOW}
     assert client.get("/api/push/window", headers=AUTH).json() == {"window": ACCOUNT_WINDOW}
-    stored = json.loads((client.app.state.state_dir / "auth" / "push_accounts.json").read_text())
+    from tests._accounts_helpers import get_accounts
+
+    stored = get_accounts(client.app.state.state_dir)
     assert stored[0]["push_window"] == ACCOUNT_WINDOW
     assert client.put("/api/push/window", headers=AUTH, json={"window": None}).json() == {"window": None}
     assert client.get("/api/push/window", headers=AUTH).json() == {"window": None}

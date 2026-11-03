@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 
 import pytest
+
+from tests._accounts_helpers import get_accounts, set_accounts
 from fastapi.testclient import TestClient
 
 from main import create_app
@@ -45,7 +47,7 @@ def register(client, headers, token):
 
 
 def tokens(accounts_path):
-    return [d["token"] for a in json.loads(accounts_path.read_text()) for d in a["device_codes"]]
+    return [d["token"] for a in get_accounts(accounts_path.parent / "state") for d in a["device_codes"]]
 
 
 def test_two_device_ids_on_the_same_account_and_platform_coexist(client):
@@ -91,7 +93,7 @@ def test_device_id_is_stored_with_the_session_and_the_push_device_and_returned_b
     headers = login(client, DEV_A)
     register(client, headers, "tok-1")
     assert client.get("/api/auth/me", headers=headers).json()["device_id"] == DEV_A
-    assert json.loads(accounts_path.read_text())[0]["device_codes"][0]["device_id"] == DEV_A
+    assert get_accounts(accounts_path.parent / "state")[0]["device_codes"][0]["device_id"] == DEV_A
     assert client.get("/api/auth/me", headers=login(client)).json()["device_id"] is None
 
 
@@ -126,7 +128,7 @@ def test_session_survives_ws_disconnect_and_relay_restart(tmp_path, accounts_pat
 
 def test_removing_the_account_ends_its_sessions(client, accounts_path):
     headers = login(client, DEV_A)
-    accounts_path.write_text(json.dumps([json.loads(accounts_path.read_text())[1]]))
+    set_accounts(accounts_path.parent / "state", [get_accounts(accounts_path.parent / "state")[1]])
     assert status(client, headers) == 401
 
 

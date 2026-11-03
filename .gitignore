@@ -54,6 +54,10 @@ dashboard/.claude/
 relay/state/*
 !relay/state/.gitkeep
 relay/ws_*capture*.json
+# relay SQLite state database (holds session hashes and the only copy of the schedules), wherever RELAY_STATE_DIR points
+relay_state.db*
+relay_state_*.db*
+*.db-journal
 
 # ---------------------------------------------------------------------------
 # SECRETS - every file below carries real credentials (DB passwords, SAS
@@ -72,7 +76,11 @@ relay/config/*.json
 !relay/config/*.example.json
 relay/config/*.plist
 
+# scripts
+scripts/
+
 # config_maker: input + everything it generates
+config_maker/
 config_maker/relay_config.json
 config_maker/configs/
 config_maker/buses/
@@ -93,6 +101,9 @@ firebase-*.json
 
 # sql setup scripts (live + ad-hoc copies such as "setup copy.sql")
 config_maker/sql
+
+# Azure SQL deployment script (carries logins and passwords)
+mssql_deployment.txt
 
 # Docs
 docs/

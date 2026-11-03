@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Optional
 
-from _lib.atomic_write import atomic_write_json
+from _state.database import Database
+from _state.importer import DOC_INFLIGHT
 
 logger = logging.getLogger("relay.scheduler.inflight")
-
-INFLIGHT_FILE = ("scheduler", "inflight.json")
 
 
 @dataclass
@@ -43,25 +41,18 @@ class ActiveRun:
 class InflightStore:
 
     def __init__(self, state_dir: Path | str):
-        self._state_dir = Path(state_dir)
-
-    def _path(self) -> Path:
-        return self._state_dir.joinpath(*INFLIGHT_FILE)
+        self._db = Database.for_dir(state_dir)
 
     def save(self, runs: list[ActiveRun], last_tick: Optional[str]) -> None:
-        atomic_write_json(
-            self._state_dir, *INFLIGHT_FILE,
-            data={"last_tick": last_tick, "runs": [r.to_json() for r in runs]},
-        )
+        self._db.put_doc(DOC_INFLIGHT, {"last_tick": last_tick, "runs": [r.to_json() for r in runs]})
 
     def load(self) -> tuple[list[ActiveRun], Optional[str]]:
-        path = self._path()
-        if not path.exists():
-            return [], None
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw = self._db.get_doc(DOC_INFLIGHT)
+            if raw is None:
+                return [], None
             runs = [ActiveRun(**item) for item in raw.get("runs", [])]
             return runs, raw.get("last_tick")
-        except (OSError, json.JSONDecodeError, TypeError, AttributeError) as exc:
-            logger.error("inflight file unreadable (%s); ignoring it", exc)
+        except (ValueError, TypeError, AttributeError) as exc:
+            logger.error("inflight state unreadable (%s); ignoring it", exc)
             return [], None

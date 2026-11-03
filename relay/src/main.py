@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -18,6 +19,7 @@ from _http.health import router as health_router
 from _http.ops_silence import router as ops_silence_router
 from _http.pipeline_errors import router as pipeline_errors_router
 from _http.downtime import router as downtime_router
+from _http.origin_guard import OriginGuardMiddleware
 from _http.push import router as push_router
 from _http.schedules import PinGateError, pin_error_handler, router as schedules_router
 from _http.auth import protected as auth_protected_router
@@ -40,6 +42,9 @@ from _push.accounts import AccountStore
 from _push.dispatcher import PushDispatcher
 from _push.paths import resolve_accounts_path
 from _session.store import SessionStore
+from _state.backup import StateBackupLoop
+from _state.database import Database, StateDbError
+from _state.importer import StateImportError
 from _push.sources import active_alerts, alert_scopes
 from _scheduler.executor_client import ExecutorClient
 from _scheduler.health_probe import HealthProbeLoop
@@ -53,7 +58,9 @@ from _ws.router import router as ws_router
 logger = logging.getLogger("relay")
 
 
-def create_app(config_path: Path | str, state_dir: Path | str | None = None, log_queue=None) -> FastAPI:
+def create_app(
+    config_path: Path | str, state_dir: Path | str | None = None, log_queue=None, fallback_config: bool = False,
+) -> FastAPI:
     config_store = ConfigStore(config_path)
     try:
         config = config_store.load_startup()
@@ -63,7 +70,9 @@ def create_app(config_path: Path | str, state_dir: Path | str | None = None, log
 
     app = FastAPI(title="Service Bus Relay", lifespan=_lifespan)
     app.state.config_store = config_store
+    app.state.fallback_config = fallback_config
     app.add_exception_handler(PinGateError, pin_error_handler)
+    app.add_middleware(OriginGuardMiddleware)
 
     app.state.poll_stats = PollStats(window_samples=config.settings.poll_stats_window_samples)
 
@@ -119,6 +128,15 @@ def create_app(config_path: Path | str, state_dir: Path | str | None = None, log
     resolved_state_dir = Path(state_dir or os.environ.get("RELAY_STATE_DIR") or default_state_dir)
     scheduler_settings = lambda: config_store.get().scheduler  # noqa: E731
     app.state.state_dir = resolved_state_dir
+    try:
+        app.state.db = Database.for_dir(
+            resolved_state_dir, accounts_file=resolve_accounts_path(config.settings.push.accounts_file, resolved_state_dir)
+        )
+    except (StateImportError, StateDbError, sqlite3.Error) as exc:
+        logger.error("refusing to start: state database %s: %s", resolved_state_dir, exc)
+        raise StartupConfigError(f"state database in {resolved_state_dir}: {exc}") from exc
+    # the fallback runs on a throwaway state dir, so it must never copy or prune anything
+    app.state.state_backup_loop = None if fallback_config else StateBackupLoop(config_store, app.state.db, resolved_state_dir)
     app.state.schedule_incidents = OpenIncidentIndex()
     app.state.scheduler_endpoint_incidents = OpenIncidentIndex()
     app.state.schedule_store = ScheduleStore(resolved_state_dir)
@@ -150,7 +168,7 @@ def create_app(config_path: Path | str, state_dir: Path | str | None = None, log
             return None
         return active_alerts(app.state, config_store.get())
 
-    app.state.accounts = AccountStore(resolve_accounts_path(config.settings.push.accounts_file, resolved_state_dir))
+    app.state.accounts = AccountStore(app.state.db)
     app.state.alert_acks = AckStore(resolved_state_dir)
 
     def _scope_resolver(alert, cfg):
@@ -168,10 +186,6 @@ def create_app(config_path: Path | str, state_dir: Path | str | None = None, log
     )
     app.state.login_rate_limiter = AckRateLimiter.from_settings(config.settings)
 
-    def _sync_accounts_path() -> None:
-        app.state.accounts.set_path(resolve_accounts_path(config_store.get().settings.push.accounts_file, resolved_state_dir))
-
-    app.state.sync_accounts_path = _sync_accounts_path
     app.state.sessions = SessionStore(
         resolved_state_dir, lambda: app.state.accounts,
     )
@@ -233,6 +247,8 @@ async def _lifespan(app: FastAPI):
         asyncio.create_task(app.state.scheduler_loop.run_forever()),
         asyncio.create_task(app.state.push.run_forever()),
     ]
+    if app.state.state_backup_loop is not None:
+        tasks.append(asyncio.create_task(app.state.state_backup_loop.run_forever()))
     try:
         yield
     finally:
@@ -243,6 +259,8 @@ async def _lifespan(app: FastAPI):
         app.state.health_probe.stop()
         app.state.scheduler_loop.stop()
         app.state.push.stop()
+        if app.state.state_backup_loop is not None:
+            app.state.state_backup_loop.stop()
         for task in tasks:
             task.cancel()
         _, pending = await asyncio.wait(tasks, timeout=SHUTDOWN_STEP_SECONDS)
@@ -251,3 +269,4 @@ async def _lifespan(app: FastAPI):
         await _bounded(app.state.scheduler_loop.shutdown(), "scheduler shutdown")
         await _bounded(app.state.executor_client.aclose(), "executor client close")
         await asyncio.get_running_loop().run_in_executor(None, app.state.machine_supervisor.shutdown_all)
+        await _bounded(asyncio.get_running_loop().run_in_executor(None, app.state.db.flush), "state database flush")

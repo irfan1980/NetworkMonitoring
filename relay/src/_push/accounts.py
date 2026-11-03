@@ -3,15 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import sqlite3
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from _lib.atomic_write import atomic_write_json
 from _lib.auth import timing_safe_equal_str
 from _push.schedule_window import WindowError, parse_schedule
+from _state.database import Database
 
 logger = logging.getLogger("relay.push.accounts")
 
@@ -19,7 +19,7 @@ PLATFORMS = ("android", "ios", "web")
 
 
 class AccountsFileError(Exception):
-    pass
+    """The accounts tables could not be read or written (the name is kept for the HTTP error code)."""
 
 
 def _now_iso() -> str:
@@ -68,102 +68,117 @@ def _normalise_account(raw) -> Optional[dict]:
 
 
 class AccountStore:
+    """Accounts live in the state database: `user_accounts` (secret, name, min_severity; owned by the operator and
+    editable with plain SQL), plus `account_devices` and `account_push_windows` which the relay writes at runtime.
+    Every read goes to the database, so rows added or removed from outside (sqlite3 CLI) apply on the next call."""
 
-    def __init__(self, path: Path | str, clock: Callable[[], str] = _now_iso):
-        self._path = Path(path)
+    def __init__(self, db: Database, clock: Callable[[], str] = _now_iso):
+        self._db = db
         self._clock = clock
         self._lock = threading.RLock()
-        self._accounts: list[dict] = []
-        self._mtime: Optional[tuple] = None
-        self._broken = False
-        self._warned_broken = False
+        self._last_good: list[dict] = []
+        self._warned = False
 
-    @property
-    def path(self) -> Path:
-        return self._path
+    @staticmethod
+    def _read(conn: sqlite3.Connection) -> list[dict]:
+        accounts: dict[str, dict] = {}
+        for secret, name, severity in conn.execute("SELECT account_secret, name, min_severity FROM user_accounts ORDER BY rowid"):
+            if not isinstance(secret, str) or not secret:
+                continue
+            try:
+                min_severity = min(5, max(1, int(severity)))
+            except (TypeError, ValueError):
+                min_severity = 5
+            accounts[secret] = {"account_secret": secret, "name": str(name or "account"), "min_severity": min_severity, "device_codes": []}
+        for secret, token, platform, device_name, registered_at, last_seen_at, device_id in conn.execute(
+            "SELECT account_secret, token, platform, device_name, registered_at, last_seen_at, device_id FROM account_devices ORDER BY rowid"
+        ):
+            account = accounts.get(secret)
+            if account is None:
+                continue
+            device = {
+                "token": token, "platform": platform if platform in PLATFORMS else "android", "device_name": device_name or "",
+                "registered_at": registered_at, "last_seen_at": last_seen_at,
+            }
+            if device_id:
+                device["device_id"] = device_id
+            account["device_codes"].append(device)
+        for secret, window in conn.execute("SELECT account_secret, window FROM account_push_windows"):
+            account = accounts.get(secret)
+            if account is None:
+                continue
+            try:
+                account["push_window"] = parse_schedule(json.loads(window))
+            except (ValueError, WindowError):
+                logger.warning("account %s: ignoring an invalid push window", account["name"])
+        return list(accounts.values())
 
-    def set_path(self, path: Path | str) -> None:
-        with self._lock:
-            if Path(path) != self._path:
-                self._path = Path(path)
-                self._mtime = None
-                self._accounts = []
+    @staticmethod
+    def write_children(conn: sqlite3.Connection, accounts: list[dict]) -> None:
+        conn.execute("DELETE FROM account_devices")
+        conn.execute("DELETE FROM account_push_windows")
+        seen: set[str] = set()
+        for account in accounts:
+            for d in account["device_codes"]:
+                if d["token"] in seen:
+                    continue
+                seen.add(d["token"])
+                conn.execute(
+                    "INSERT INTO account_devices(token, account_secret, platform, device_name, registered_at, last_seen_at, device_id)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (d["token"], account["account_secret"], d["platform"], d["device_name"], d["registered_at"], d["last_seen_at"], d.get("device_id")),
+                )
+            if account.get("push_window") is not None:
+                conn.execute(
+                    "INSERT INTO account_push_windows(account_secret, window) VALUES (?, ?)",
+                    (account["account_secret"], json.dumps(account["push_window"])),
+                )
 
-    def _stat(self) -> Optional[tuple]:
+    def _load(self) -> list[dict]:
         try:
-            info = self._path.stat()
-            return info.st_mtime_ns, info.st_size
-        except OSError:
-            return None
+            accounts = self._db.read(self._read)
+            self._last_good, self._warned = accounts, False
+            return accounts
+        except sqlite3.Error as exc:
+            if not self._warned:
+                logger.warning("accounts could not be read (%s); using the last good copy", exc)
+                self._warned = True
+            return self._last_good
 
-    def _read_file(self) -> list[dict]:
-        for attempt in range(5):
-            try:
-                text = self._path.read_text(encoding="utf-8")
-                break
-            except PermissionError:
-                if attempt == 4:
-                    raise
-                time.sleep(0.02)  # another writer is mid-replace
-        raw = json.loads(text)
-        if not isinstance(raw, list):
-            raise ValueError("push accounts file must contain a JSON list")
-        return [a for a in (_normalise_account(x) for x in raw) if a]
-
-    def refresh(self) -> None:
-        with self._lock:
-            mtime = self._stat()
-            if mtime == self._mtime and not self._broken:
-                return
-            if mtime is None:
-                self._accounts, self._mtime, self._broken = [], None, False
-                return
-            try:
-                self._accounts = self._read_file()
-                self._broken = False
-                self._warned_broken = False
-            except (OSError, ValueError) as exc:
-                self._broken = True
-                if not self._warned_broken:
-                    logger.warning("push accounts file unreadable (%s); keeping the last good copy: %s", self._path, exc)
-                    self._warned_broken = True
-            self._mtime = mtime
+    def count(self) -> int:
+        return len(self._load())
 
     def accounts(self) -> list[dict]:
-        with self._lock:
-            self.refresh()
-            return [dict(a, device_codes=[dict(d) for d in a["device_codes"]]) for a in self._accounts]
+        return [dict(a, device_codes=[dict(d) for d in a["device_codes"]]) for a in self._load()]
 
     def find_by_secret(self, secret: str) -> Optional[dict]:
-        with self._lock:
-            self.refresh()
-            found = None
-            for account in self._accounts:
-                if timing_safe_equal_str(secret or "", account["account_secret"]):
-                    found = account
-            return None if found is None else dict(found, device_codes=[dict(d) for d in found["device_codes"]])
+        found = None
+        for account in self._load():
+            if timing_safe_equal_str(secret or "", account["account_secret"]):
+                found = account
+        return None if found is None else dict(found, device_codes=[dict(d) for d in found["device_codes"]])
 
     def account_for_token(self, token: str) -> Optional[dict]:
-        with self._lock:
-            self.refresh()
-            for account in self._accounts:
-                if any(d["token"] == token for d in account["device_codes"]):
-                    return dict(account, device_codes=[dict(d) for d in account["device_codes"]])
-            return None
+        for account in self._load():
+            if any(d["token"] == token for d in account["device_codes"]):
+                return dict(account, device_codes=[dict(d) for d in account["device_codes"]])
+        return None
 
     def _mutate(self, change: Callable[[list[dict]], bool]) -> bool:
+        outcome = {"changed": False}
+
+        def apply(conn: sqlite3.Connection) -> None:
+            accounts = self._read(conn)
+            outcome["changed"] = change(accounts)
+            if outcome["changed"]:
+                self.write_children(conn, accounts)
+
         with self._lock:
-            if self._stat() is not None:
-                try:
-                    self._accounts = self._read_file()
-                    self._broken = False
-                except (OSError, ValueError) as exc:
-                    raise AccountsFileError(f"push accounts file is unreadable: {exc}") from exc
-            changed = change(self._accounts)
-            if changed:
-                atomic_write_json(self._path.parent, self._path.name, data=self._accounts)
-            self._mtime = self._stat()
-            return changed
+            try:
+                self._db.write(apply)
+            except sqlite3.Error as exc:
+                raise AccountsFileError(f"accounts could not be saved: {exc}") from exc
+            return outcome["changed"]
 
     def register(self, secret: str, token: str, platform: str, device_name: str, device_id: Optional[str] = None) -> Optional[dict]:
         result: dict = {}

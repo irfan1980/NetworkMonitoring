@@ -8,6 +8,7 @@ import pytest
 from _push.accounts import account_key
 
 from .conftest import alert, device
+from tests._state_helpers import dump_state_text
 
 
 async def test_nothing_is_sent_before_the_grace_period_and_the_payload_is_complete(push):
@@ -211,7 +212,7 @@ async def test_state_file_never_contains_secrets(push):
     await push.dispatcher.tick()
     push.dispatcher.mutes.mute("machine:4", account_key("1111"))
     await push.run(16)
-    text = "".join(p.read_text() for p in (push.tmp / "state" / "push").glob("*.json"))
+    text = dump_state_text(push.tmp / "state")
     assert "1111" not in text and "2222" not in text and "ops-1" not in text
 
 

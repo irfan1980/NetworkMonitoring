@@ -53,7 +53,7 @@ class DispatchSettings(BaseModel):
 
 class PushSettings(BaseModel):
     enabled: bool = Field(False, description="Send FCM push notifications for active alerts.")
-    accounts_file: str = Field("", description="Accounts file. Empty means <state dir>/auth/push_accounts.json; relative paths resolve against relay/.")
+    accounts_file: str = Field("", description="Deprecated. Accounts live in the state database (table user_accounts). This path is read once, only to import an existing accounts file into an empty accounts table; empty means <state dir>/auth/push_accounts.json, relative paths resolve against relay/.")
     service_account_file: str = Field(
         "config/firebase-service-account.json", description="Firebase service-account key; relative paths resolve against relay/."
     )
@@ -62,6 +62,17 @@ class PushSettings(BaseModel):
     repeat_minutes_unacknowledged: float = Field(15, gt=0, description="Minutes between repeat pushes of an active, unacknowledged alert.")
     repeat_minutes_acknowledged: float = Field(30, gt=0, description="Minutes between repeat pushes of an active, acknowledged alert.")
     dashboard_url: str = Field("", description="Dashboard base URL used for web-push links.")
+
+
+class StateBackupSettings(BaseModel):
+    enabled: bool = Field(True, description="Copy the state database once a day (UTC) and delete copies past retention_days.")
+    folder: str = Field(
+        "", description="Backup folder. Empty means <state dir>/backups; relative paths resolve against relay/."
+    )
+    retention_days: int = Field(
+        30, ge=1, le=3650, description="Copies dated more than this many days ago are deleted after a successful copy. The newest copy is always kept."
+    )
+    retry_minutes: float = Field(30, gt=0, description="Minutes before a failed or missed copy is tried again, and between date checks.")
 
 
 class Settings(BaseModel):
@@ -207,10 +218,15 @@ class Settings(BaseModel):
     ack_pin: str = Field(..., min_length=1, description="PIN required to acknowledge alerts. No default because it is a credential.")
     dispatch: DispatchSettings = Field(default_factory=DispatchSettings)
     push: PushSettings = Field(default_factory=PushSettings)
+    state_backup: StateBackupSettings = Field(default_factory=StateBackupSettings)
+    log_retention_days: int = Field(
+        30, ge=1, le=3650,
+        description="Daily relay log files (<date>_info_log.log, <date>_error_log.log) dated more than this many days ago are deleted at startup and each rollover. Other files in the log folder are never touched.",
+    )
 
     ws_allowed_origins: list[str] = Field(
         default_factory=list,
-        description="Exact Origin header values allowed on top of the automatic LAN and loopback allow-list. Any other origin is refused at WebSocket upgrade.",
+        description="Exact Origin header values allowed on top of the automatic LAN and loopback allow-list. Any other origin is refused at WebSocket upgrade (close 4403) and on every REST route (403 origin_forbidden). Requests with no Origin header are not affected. The name is kept for backward compatibility; it governs REST and CORS too.",
     )
 
 
@@ -488,6 +504,11 @@ class SchedulerSettings(BaseModel):
     log_keep_days: int = Field(90, ge=0, description="Run log entries newer than this are kept.")
     log_keep_runs: int = Field(1000, ge=0, description="Newest run log entries per schedule that are kept. The larger retention of days or runs wins.")
     log_output_tail_kb: int = Field(64, ge=1, description="Cap on stored stdout and stderr per run.")
+    log_max_age_days: int = Field(
+        30, ge=1, le=3650,
+        description="Finished runs whose end time is more than this many days ago are deleted from the run history at startup and "
+        "once a day, whatever log_keep_runs says. Unfinished or undated rows and the newest row of each schedule are kept.",
+    )
     extra_allowed_ips: list[str] = Field(
         default_factory=list, description="Machine-side setting (config_maker); the relay only validates it."
     )

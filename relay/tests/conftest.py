@@ -4,9 +4,14 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
+import os
+
 import pytest
 
 from _fixtures import env
+
+# the test temp dir can sit on a disk where each fsync costs hundreds of ms
+os.environ.setdefault("RELAY_STATE_SYNCHRONOUS", "OFF")
 
 from ._db_lock import acquire as _acquire_db_lock
 from ._db_lock import release as _release_db_lock
@@ -44,6 +49,7 @@ def _isolated_state_dir(tmp_path_factory, monkeypatch):
 
     state = tmp_path_factory.mktemp("relay_state")
     monkeypatch.setenv("RELAY_STATE_DIR", str(state))
+    monkeypatch.setenv("RELAY_LOG_DIR", str(state.parent / (state.name + "_logs")))  # no test or child process may write relay/logs
     accounts = state / "auth" / "push_accounts.json"
     accounts.parent.mkdir(parents=True)
     accounts.write_text(json.dumps([

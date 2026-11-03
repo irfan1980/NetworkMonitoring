@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
@@ -8,11 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from _lib.atomic_write import atomic_write_json
+from _state.database import Database
+from _state.importer import DOC_ACKS
 
 logger = logging.getLogger("relay.alerts.ack")
-
-ACKS_FILE = ("push", "acks.json")
 
 
 def _iso(epoch: float) -> str:
@@ -22,7 +20,7 @@ def _iso(epoch: float) -> str:
 class AckStore:
 
     def __init__(self, state_dir: Path | str, clock: Callable[[], float] = time.time):
-        self._state_dir = Path(state_dir)
+        self._db = Database.for_dir(state_dir)
         self._clock = clock
         self._lock = threading.RLock()
         self._acks: dict[str, dict] = {}
@@ -31,20 +29,19 @@ class AckStore:
         self._load()
 
     def _load(self) -> None:
-        path = self._state_dir.joinpath(*ACKS_FILE)
-        if not path.exists():
-            return
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw = self._db.get_doc(DOC_ACKS)
+            if raw is None:
+                return
             self._acks = {
                 str(k): {"acknowledged_at": float(v["acknowledged_at"]), "acknowledged_by": str(v["acknowledged_by"])}
                 for k, v in raw["acks"].items()
             }
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            logger.warning("alert acks file unreadable (%s); starting empty", exc)
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            logger.warning("alert acks unreadable (%s); starting empty", exc)
 
     def _save(self) -> None:
-        atomic_write_json(self._state_dir, *ACKS_FILE, data={"acks": self._acks})
+        self._db.put_doc(DOC_ACKS, {"acks": self._acks})
 
     def acknowledge(self, alert_id: str, by: str) -> dict:
         with self._lock:

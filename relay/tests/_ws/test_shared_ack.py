@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from _alerts.dedup import AlertKey
 from _alerts.shared_ack import AckStore
 from main import create_app
+from tests._state_helpers import read_doc
 
 AUTH_QS = "token=test-session-token-0123456789abcdef0123456789abcdef"
 
@@ -57,9 +58,8 @@ def test_a_wrong_pin_stores_nothing(client):
 def test_ack_persists_atomically_and_survives_a_restart(tmp_path):
     store = AckStore(tmp_path, clock=lambda: 1000.0)
     store.acknowledge("machine:4", "Ops")
-    saved = json.loads((tmp_path / "push" / "acks.json").read_text())
+    saved = read_doc(tmp_path, "push/acks")
     assert saved == {"acks": {"machine:4": {"acknowledged_at": 1000.0, "acknowledged_by": "Ops"}}}
-    assert not list((tmp_path / "push").glob("*.tmp"))
     assert AckStore(tmp_path).is_acked("machine:4")
 
 
@@ -83,4 +83,4 @@ def test_ack_clears_after_the_alert_has_been_gone_longer_than_the_hold(tmp_path)
     now["t"] += 15
     store.retain(set(), 15)
     assert not store.is_acked("a")
-    assert json.loads((tmp_path / "push" / "acks.json").read_text()) == {"acks": {}}
+    assert read_doc(tmp_path, "push/acks") == {"acks": {}}

@@ -8,20 +8,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from _lib.atomic_write import atomic_write_json
+from _state.database import Database
+from _state.importer import DOC_PUSH_STATE
 from _alerts.shared_ack import AckStore
 from _push.downtime import DowntimeStore
 from _push.schedule_window import is_active
 from _push.accounts import AccountStore, AccountsFileError, account_key
 from _push.fcm import FcmClient, build_message
 from _push.mutes import MuteStore
-from _push.paths import resolve_accounts_path, resolve_push_path
+from _push.paths import resolve_push_path
 from _push.machine_alert import Cadence, resolve_cadence
 from _push.sources import alert_scopes
 
 logger = logging.getLogger("relay.push")
 
-STATE_FILE = ("push", "state.json")
 TITLE_LIMIT = 100
 
 
@@ -52,11 +52,12 @@ class PushDispatcher:
     ):
         self._config_store = config_store
         self._state_dir = Path(state_dir)
+        self._db = Database.for_dir(state_dir)
         self._alert_source = alert_source
         self._fcm_factory = fcm_factory
         self._clock = clock
         push = config_store.get().settings.push
-        self.accounts = accounts or AccountStore(resolve_accounts_path(push.accounts_file, self._state_dir))
+        self.accounts = accounts or AccountStore(self._db)
         self.mutes = mutes or MuteStore(self._state_dir)
         self.downtime = downtime or DowntimeStore(self._state_dir)
         self.acks = acks or AckStore(self._state_dir, clock)
@@ -70,25 +71,26 @@ class PushDispatcher:
         self._availability: Optional[str] = None
         self.unavailable_reason: Optional[str] = None
         self._running = False
+        self._baseline_open = True
         self._load()
 
     def _load(self) -> None:
-        path = self._state_dir.joinpath(*STATE_FILE)
-        if not path.exists():
-            return
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw = self._db.get_doc(DOC_PUSH_STATE)
+            if raw is None:
+                return
             self._states = {k: AlertPushState(first_seen=float(v["first_seen"]), sent=dict(v.get("sent", {}))) for k, v in raw.get("alerts", {}).items()}
             self._last_pushed = {k: float(v) for k, v in raw.get("last_pushed", {}).items()}
-        except (OSError, ValueError, TypeError, KeyError) as exc:
+        except (ValueError, TypeError, KeyError) as exc:
             logger.warning("push state unreadable (%s); starting fresh", exc)
 
     def _save(self) -> None:
         horizon = self._clock() - 86400
         self._last_pushed = {k: v for k, v in self._last_pushed.items() if v >= horizon}
-        atomic_write_json(
-            self._state_dir, *STATE_FILE,
-            data={"alerts": {k: v.to_json() for k, v in self._states.items()}, "last_pushed": self._last_pushed},
+        self._db.put_doc(
+            DOC_PUSH_STATE,
+            {"alerts": {k: v.to_json() for k, v in self._states.items()}, "last_pushed": self._last_pushed},
+            durable=False,
         )
 
     def current_alerts(self) -> Optional[list[dict]]:
@@ -143,6 +145,19 @@ class PushDispatcher:
         if now - record["last"] < self._repeat_interval(alert, cadence):
             return None
         return "repeat"
+
+    def _rebaseline(self, alert: dict, state: AlertPushState, now: float, cadence: Cadence) -> bool:
+        # First evaluation after a start: a repeat overdue by more than one whole interval was missed because the relay
+        # was down, so the next one comes a normal interval from now instead of every alert repeating at once.
+        interval = self._repeat_interval(alert, cadence)
+        moved = False
+        for record in state.sent.values():
+            if now - record["last"] >= 2 * interval:
+                record["last"] = now
+                moved = True
+        if moved:
+            logger.info("push: repeat timers for alert=%s re-baselined after downtime", alert["alertId"])
+        return moved
 
     def _note(self, alert: dict, account: dict, key: str, reason: str) -> None:
         if self._decisions.get((alert["alertId"], key)) != reason:
@@ -216,7 +231,6 @@ class PushDispatcher:
         self._track(alerts)
         if not push.enabled:
             return 0
-        self.accounts.set_path(resolve_accounts_path(push.accounts_file, self._state_dir))
         if not self._ensure_fcm(push):
             return 0
         now = self._clock()
@@ -230,6 +244,8 @@ class PushDispatcher:
             cadence = resolve_cadence(scopes, config, push)
             downtime_ids = sorted({wid for m, svc in scopes for wid in self.downtime.active_ids(m, svc, now)})
             title, link = self._title(alert), self._link(push, alert)
+            if self._baseline_open:
+                changed |= self._rebaseline(alert, state, now, cadence)
             for account in accounts:
                 key = account_key(account["account_secret"])
                 if not account["device_codes"]:
@@ -272,6 +288,7 @@ class PushDispatcher:
             for stale in set(state.sent) - keys:
                 del state.sent[stale]
                 changed = True
+        self._baseline_open = False
         if changed:
             self._save()
         if not jobs:

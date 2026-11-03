@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import uuid
 from pathlib import Path
 from typing import Optional
 
-from _lib.atomic_write import atomic_write_json
 from _push.schedule_window import WindowError, is_active, parse_schedule
+from _state.database import Database
+from _state.importer import DOC_DOWNTIME
 
 logger = logging.getLogger("relay.push.downtime")
 
-DOWNTIME_FILE = ("push", "downtime.json")
 NOTE_LIMIT = 500
 
 
@@ -33,24 +32,22 @@ def parse_window(raw, window_id: str) -> dict:
 class DowntimeStore:
 
     def __init__(self, state_dir: Path | str):
-        self._state_dir = Path(state_dir)
+        self._db = Database.for_dir(state_dir)
         self._lock = threading.RLock()
         self._windows: list[dict] = []
         self._load()
 
     def _load(self) -> None:
-        path = self._state_dir.joinpath(*DOWNTIME_FILE)
-        if not path.exists():
-            return
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            self._windows = [parse_window(w, str(w["id"])) for w in raw["windows"]]
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            logger.warning("downtime file unreadable (%s); starting empty", exc)
+            raw = self._db.get_doc(DOC_DOWNTIME)
+            if raw is not None:
+                self._windows = [parse_window(w, str(w["id"])) for w in raw["windows"]]
+        except (ValueError, KeyError, TypeError) as exc:
+            logger.warning("downtime unreadable (%s); starting empty", exc)
             self._windows = []
 
     def _save(self) -> None:
-        atomic_write_json(self._state_dir, *DOWNTIME_FILE, data={"windows": self._windows})
+        self._db.put_doc(DOC_DOWNTIME, {"windows": self._windows})
 
     def list(self) -> list[dict]:
         with self._lock:

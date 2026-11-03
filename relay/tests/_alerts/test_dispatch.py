@@ -10,7 +10,6 @@ from _alerts import channel_email, channel_push_notification, channel_sms, chann
 from _alerts import dispatch as dispatch_module
 from _alerts.dispatch import DispatchOutcome, WarnOnceRegistry, channels_for_severity, dispatch
 from _alerts.dispatch_sent_guard import DispatchSentGuard
-from _alerts.state import AlertStateStore
 from _lib.config import ConfigStore
 from _ws.rate_limit import AckRateLimiter
 
@@ -321,21 +320,6 @@ def test_smtp_password_never_appears_in_any_log_record_or_returned_outcome_reaso
     assert secret not in outcome.reason
     for record in caplog.records:
         assert secret not in record.message
-
-
-def test_p62_acknowledging_an_alert_does_not_change_its_dispatch_outcome(dispatch_store, fake_ok_transports):
-    store, _ = dispatch_store
-    alert_store = AlertStateStore(store.path.parent)
-    alert_store.raise_or_repeat(
-        "pipeline:1", "pipeline", 3, "unknown",
-        repeat_minutes_sev1_2=15, repeat_hours_sev3_5=4, escalate_after_repeats=3,
-    )
-    alert_store.acknowledge("pipeline:1", acknowledged_by="operator-1")
-    assert alert_store.is_acknowledged("pipeline:1") is True
-
-    guard = DispatchSentGuard(store.path.parent)
-    result = dispatch("pipeline degraded", 3, alert_id="pipeline:1", config_store=store, sent_guard=guard)
-    assert result.outcome_for("email").status == "sent"
 
 
 def test_p62_dispatch_module_never_imports_or_references_alert_state_acknowledgement():

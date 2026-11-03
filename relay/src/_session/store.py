@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import secrets
 import threading
@@ -11,12 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from _lib.atomic_write import atomic_write_json
 from _push.accounts import AccountsFileError, account_key
+from _state.database import Database
 
 logger = logging.getLogger("relay.session")
 
-SESSIONS_FILE = ("auth", "sessions.json")
+COLUMNS = ("hash", "account", "account_key", "device_name", "platform", "created_at", "last_used_at", "expires_at", "push_token", "device_id")
 TOUCH_INTERVAL_SECONDS = 60
 MAX_SESSIONS = 2000
 NO_EXPIRY_SECONDS = 10 * 365 * 86400
@@ -62,7 +61,7 @@ class SessionStore:
         accounts_getter: Callable[[], object],
         clock: Callable[[], float] = time.time,
     ):
-        self._state_dir = Path(state_dir)
+        self._db = Database.for_dir(state_dir)
         self._accounts = accounts_getter
         self._clock = clock
         self._lock = threading.RLock()
@@ -70,20 +69,31 @@ class SessionStore:
         self._load()
 
     def _load(self) -> None:
-        path = self._state_dir.joinpath(*SESSIONS_FILE)
-        if not path.exists():
-            return
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            for item in raw.get("sessions", []):
-                record = SessionRecord(**item)
-                self._records[record.hash] = record
-        except (OSError, ValueError, TypeError) as exc:
-            logger.warning("sessions file unreadable (%s); starting with no sessions", exc)
-            self._records = {}
+        for row in self._db.query(f"SELECT {', '.join(COLUMNS)} FROM sessions"):
+            record = SessionRecord(**dict(zip(COLUMNS, row)))
+            self._records[record.hash] = record
 
-    def _save(self) -> None:
-        atomic_write_json(self._state_dir, *SESSIONS_FILE, data={"sessions": [asdict(r) for r in self._records.values()]})
+    def _upsert(self, record: SessionRecord, durable: bool = True) -> None:
+        values = tuple(getattr(record, c) for c in COLUMNS)
+        sql = f"INSERT OR REPLACE INTO sessions({', '.join(COLUMNS)}) VALUES ({', '.join('?' for _ in COLUMNS)})"
+        if durable:
+            self._db.write(lambda conn: conn.execute(sql, values))
+        else:
+            self._db.submit(("session", record.hash), lambda conn: conn.execute(sql, values))
+
+    def _create_rows(self, dropped: list[str], record: SessionRecord) -> None:
+        values = tuple(getattr(record, c) for c in COLUMNS)
+        sql = f"INSERT OR REPLACE INTO sessions({', '.join(COLUMNS)}) VALUES ({', '.join('?' for _ in COLUMNS)})"
+
+        def apply(conn) -> None:
+            conn.executemany("DELETE FROM sessions WHERE hash=?", [(h,) for h in dropped])
+            conn.execute(sql, values)
+
+        self._db.write(apply)
+
+    def _delete(self, hashes: list[str]) -> None:
+        if hashes:
+            self._db.write(lambda conn: conn.executemany("DELETE FROM sessions WHERE hash=?", [(h,) for h in hashes]))
 
     def _drop(self, record: SessionRecord, keep_token: Optional[str] = None) -> None:
         self._records.pop(record.hash, None)
@@ -104,17 +114,21 @@ class SessionStore:
             now = self._clock()
             token = secrets.token_urlsafe(32)
             key = account_key(account["account_secret"])
+            dropped: list[str] = []
             if device_id:
                 for existing in [r for r in self._records.values() if r.account_key == key and r.device_id == device_id]:
                     self._drop(existing)
+                    dropped.append(existing.hash)
             while len(self._records) >= MAX_SESSIONS:
-                self._drop(min(self._records.values(), key=lambda r: r.last_used_at))
+                oldest = min(self._records.values(), key=lambda r: r.last_used_at)
+                self._drop(oldest)
+                dropped.append(oldest.hash)
             record = SessionRecord(
                 hash=hash_token(token), account=account["name"], account_key=key, device_name=device_name, platform=platform,
                 created_at=now, last_used_at=now, expires_at=now + NO_EXPIRY_SECONDS, device_id=device_id,
             )
             self._records[record.hash] = record
-            self._save()
+            self._create_rows(dropped, record)
             return token, Session(record, account)
 
     def verify(self, token: Optional[str]) -> tuple[Optional[Session], str]:
@@ -128,34 +142,33 @@ class SessionStore:
             account = self._account_for(record.account_key)
             if account is None:
                 del self._records[record.hash]
-                self._save()
+                self._delete([record.hash])
                 return None, "account_removed"
             if now - record.last_used_at >= TOUCH_INTERVAL_SECONDS:
                 record.last_used_at = now
                 record.expires_at = now + NO_EXPIRY_SECONDS
                 record.account = account["name"]
-                self._save()
+                self._upsert(record, durable=False)
             return Session(record, account), "ok"
 
     def revoke(self, session: Session) -> None:
         with self._lock:
             if self._records.pop(session.record.hash, None) is not None:
-                self._save()
+                self._delete([session.record.hash])
 
     def set_push_token(self, session: Session, push_token: Optional[str]) -> None:
         with self._lock:
             record = self._records.get(session.record.hash)
             if record is not None and record.push_token != push_token:
                 record.push_token = push_token
-                self._save()
+                self._upsert(record)
 
     def revoke_for_tokens(self, tokens: set[str]) -> int:
         with self._lock:
             doomed = [r for r in self._records.values() if r.push_token in tokens]
             for record in doomed:
                 del self._records[record.hash]
-            if doomed:
-                self._save()
+            self._delete([r.hash for r in doomed])
             return len(doomed)
 
     def count(self) -> int:

@@ -138,7 +138,9 @@ async def test_metrics_are_populated_even_for_a_stale_discarded_generation():
 
 
 async def test_missing_object_ids_are_treated_as_unread_across_cycles():
-    dc = DownConfirm()
+    # a frozen clock: with the real one the streak is a few ms, 0.0 only where monotonic() ticks at 15.6 ms (Python 3.12 on Windows)
+    now = {"ms": 1000.0}
+    dc = DownConfirm(now_ms=lambda: now["ms"])
     poller = Poller(dc)
 
     specs_with_object = [PollSpec("db:1001", [("tcp", ok_stage())])]
@@ -152,6 +154,8 @@ async def test_missing_object_ids_are_treated_as_unread_across_cycles():
     assert "db:1001:tcp" in r2.confirmed
     assert r2.confirmed["db:1001:tcp"] == OK
     assert dc.unread_streak_ms("db:1001:tcp") == 0.0
+    now["ms"] += 250.0
+    assert dc.unread_streak_ms("db:1001:tcp") == 250.0
 
 
 async def test_a_stale_object_id_does_not_drift_out_of_observation_forever():

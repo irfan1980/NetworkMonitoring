@@ -78,7 +78,7 @@ def compute_config_issues(config: RelayConfig, schedules=None, state_dir=None) -
 
     push = config.settings.push
     if push.enabled:
-        from _push.paths import RELAY_ROOT, resolve_accounts_path, resolve_push_path
+        from _push.paths import resolve_push_path
 
         if not resolve_push_path(push.service_account_file).is_file():
             issues.append(
@@ -90,17 +90,20 @@ def compute_config_issues(config: RelayConfig, schedules=None, state_dir=None) -
                     where={"entity": "settings.push.service_account_file"},
                 )
             )
-        accounts_path = resolve_accounts_path(push.accounts_file, state_dir or RELAY_ROOT / "state")
-        if not accounts_path.is_file():
-            issues.append(
-                ConfigIssue(
-                    code="push_accounts_file_missing",
-                    severity="info",
-                    message=f"push is enabled but the accounts file {str(accounts_path)!r} does not exist; "
-                    "no device can register until it is created.",
-                    where={"entity": "settings.push.accounts_file"},
+        if state_dir is not None:
+            from _push.accounts import AccountStore
+            from _state.database import Database
+
+            if AccountStore(Database.for_dir(state_dir)).count() == 0:
+                issues.append(
+                    ConfigIssue(
+                        code="push_no_accounts",
+                        severity="info",
+                        message="push is enabled but the user_accounts table is empty; nobody can log in or register a device "
+                        "until an account is added (see relay/README.md).",
+                        where={"entity": "user_accounts"},
+                    )
                 )
-            )
 
     for name, value in (
         ("bus", config.alerts.object_severities.bus),
