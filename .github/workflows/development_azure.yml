@@ -1,0 +1,102 @@
+# Dashboard (dashboard/, Expo web export), gateway (gateway/) and relay (relay/) deployed together as ONE package to the one
+# App Service, devmonitoringApp (same azure/webapps-deploy action, slot and publish-profile secret as before).
+# Package layout = /home/site/wwwroot: dashboard/ gateway/ relay/. Runtime data lives in /home/relay, outside wwwroot.
+# Requires the App Service setting SCM_DO_BUILD_DURING_DEPLOYMENT=false (see docs/github-actions.md).
+
+name: Build and deploy Dashboard + Gateway + Relay to Azure Web App - devmonitoringApp
+
+on:
+  push:
+    branches:
+      - 'Development'
+    paths:
+      - 'dashboard/**'
+      - 'gateway/**'
+      - 'relay/**'
+      - '.github/workflows/development_azure.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read #This is required for actions/checkout
+    env:
+      # EXPO_PUBLIC_RELAY_WS_URL is left unset on purpose: the web build then derives ws(s)://<page host>/ws
+      EXPO_PUBLIC_FIXTURE: '0'
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node version
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24.x' # dashboard/package.json engines: node >=24.12
+          cache: 'yarn'
+          cache-dependency-path: dashboard/yarn.lock
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: yarn install --frozen-lockfile
+
+      - name: Type check dashboard
+        working-directory: dashboard
+        run: yarn typecheck
+
+      - name: Build dashboard web export
+        working-directory: dashboard
+        run: npx expo export --platform web --output-dir dist --clear
+
+      # Python dependencies are not shipped: gateway/supervisor.py builds one virtualenv per folder under /home/relay.
+      - name: Package dashboard, gateway and relay
+        run: |
+          set -euo pipefail
+          test -f dashboard/dist/index.html
+          rm -rf stage && mkdir -p stage/dashboard
+          cp -a dashboard/dist/. stage/dashboard/
+          cp -a gateway stage/gateway
+          cp -a relay stage/relay
+          rm -rf stage/gateway/tests stage/gateway/pytest.ini stage/gateway/requirements-dev.txt stage/relay/tests stage/relay/pytest.ini
+          find stage \( -name __pycache__ -o -name .pytest_cache \) -prune -exec rm -rf {} +
+          # wwwroot holds only static files and Python sources: tell Kudu not to run an Oryx build (best effort,
+          # the App Service setting is what is relied on)
+          printf '[config]\nSCM_DO_BUILD_DURING_DEPLOYMENT=false\n' > stage/.deployment
+          test -f stage/gateway/supervisor.py && test -f stage/gateway/server.py && test -f stage/relay/run.py
+          (cd stage && zip -qr ../devmonitoringapp.zip .)
+
+      - name: Upload artifact for deployment jobs
+        uses: actions/upload-artifact@v6
+        with:
+          name: devmonitoringapp-package
+          path: devmonitoringapp.zip
+          if-no-files-found: error
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    # keep deployments to the app one at a time (a second run waits instead of overlapping)
+    concurrency:
+      group: azure-deploy-devmonitoringApp
+      cancel-in-progress: false
+
+    steps:
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v7
+        with:
+          name: devmonitoringapp-package
+
+      # One OneDeploy of the whole wwwroot. clean is set explicitly: files left from older deployments (old hashed
+      # dashboard bundles) are removed. Data in /home/relay is outside wwwroot and not touched. restart starts the
+      # new supervisor.py (gateway + relay).
+      - name: 'Deploy to Azure Web App'
+        uses: azure/webapps-deploy@v3
+        id: deploy-to-webapp
+        with:
+          app-name: 'devmonitoringApp'
+          slot-name: 'Production'
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_21FA5A948323482DA2875B8A95BDD27D }}
+          package: devmonitoringapp.zip
+          type: zip
+          target-path: /home/site/wwwroot
+          clean: true
+          restart: true
