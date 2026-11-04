@@ -58,7 +58,7 @@ jobs:
         id: deploy-gateway
         with:
           app-name: 'devmonitoringApp'
-          slot-name: 'devmonitoringapp-dev'
+          slot-name: 'Production'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_21FA5A948323482DA2875B8A95BDD27D }}
           package: gateway.zip
           type: zip
@@ -71,7 +71,7 @@ jobs:
         id: deploy-relay
         with:
           app-name: 'devmonitoringApp'
-          slot-name: 'devmonitoringapp-dev'
+          slot-name: 'Production'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_21FA5A948323482DA2875B8A95BDD27D }}
           package: relay.zip
           type: zip
