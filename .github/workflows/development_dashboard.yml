@@ -49,6 +49,8 @@ jobs:
       - name: Package dashboard
         run: |
           test -f dist/index.html
+          # static files only: tell Kudu not to run an Oryx build (it finds no platform and fails the deploy)
+          printf '[config]\nSCM_DO_BUILD_DURING_DEPLOYMENT=false\n' > dist/.deployment
           (cd dist && zip -qr ../dashboard.zip .)
 
       - name: Upload artifact for deployment jobs
