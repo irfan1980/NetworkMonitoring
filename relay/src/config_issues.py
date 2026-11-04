@@ -24,16 +24,6 @@ def compute_config_issues(config: RelayConfig, schedules=None, state_dir=None) -
 
     for server in config.servers:
         used_bus_ids.update(server.used_buses)
-        if not server.used_buses:
-            issues.append(
-                ConfigIssue(
-                    code="server_unused_by_any_bus",
-                    severity="info",
-                    message=f"server {server.id} ({server.name!r}) has an empty "
-                    "used_buses — it is configured but not attached to any bus.",
-                    where={"serverId": server.id},
-                )
-            )
 
     seen_databases: dict[tuple, int] = {}
     for server in config.servers:

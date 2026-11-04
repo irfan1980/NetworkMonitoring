@@ -168,6 +168,30 @@ The value must be exactly `1` (PowerShell: `$env:RELAY_LIVE_LAB = "1"`).
 - The dashboard can run with no relay: `EXPO_PUBLIC_FIXTURE=1` renders bundled fixture data.
 - Guided full-system test with fault injection: [docs/manual-test.md](docs/manual-test.md).
 
+## Running tests locally
+
+The GitHub Actions workflows no longer run tests; run them on your machine. Needs Python 3.12 or newer (3.14 used for the check) and Node >=24.12 with yarn. In PowerShell, from the repo root (venvs outside the repo are fine; any folder works):
+
+```
+# relay (about 4 minutes; one run at a time)
+py -3.14 -m venv $env:TEMP\relay-venv
+& $env:TEMP\relay-venv\Scripts\python -m pip install -r relay\requirements.txt
+cd relay; & $env:TEMP\relay-venv\Scripts\python -m pytest -q -p no:cacheprovider; cd ..
+
+# config_maker (same venv as relay)
+& $env:TEMP\relay-venv\Scripts\python -m pytest config_maker\tests -q -p no:cacheprovider
+
+# gateway
+py -3.14 -m venv $env:TEMP\gateway-venv
+& $env:TEMP\gateway-venv\Scripts\python -m pip install -r gateway\requirements-dev.txt
+cd gateway; & $env:TEMP\gateway-venv\Scripts\python -m pytest -q -p no:cacheprovider; cd ..
+
+# dashboard (no unit tests: type check and Firebase config check)
+cd dashboard; yarn install --frozen-lockfile; yarn typecheck; yarn check:firebase; cd ..
+```
+
+Run the relay tests from `relay\` (its `pytest.ini` sets the paths). Use `py -V:<tag>` (see `py -0`) if `py -3.14` is not found. Last run: relay 1355 passed, 55 skipped; config_maker 224 passed, 10 skipped; gateway 35 passed; dashboard typecheck clean.
+
 ## Docs map
 
 | Doc | What it covers |
@@ -189,6 +213,19 @@ The value must be exactly `1` (PowerShell: `$env:RELAY_LIVE_LAB = "1"`).
 | [docs/demo/README.md](docs/demo/README.md) | Demo material: presenter guide and technical reference PDFs |
 
 ## Tasks completed
+- 2026-11-04 (task 56): Removed the `server_unused_by_any_bus` config issue ("server N has an empty used_buses"): a server with an empty `used_buses` and no bus configured is valid, and a bus never references a server, so no real inconsistency existed. `service_bus_unused_by_any_server` and the pipeline topic checks are unchanged. See `docs/relay/architecture/contract-schema.md`.
+- 2026-11-04 (task 55): Dashboard users on Azure: create `/home/relay/state/relay_state.db` by hand with a refuse-if-exists `sqlite3` CLI script (schema 2, triggers, meta markers; verified identical to `Database.for_dir`), then insert accounts one row at a time. See `docs/relay/state-database.md`.
+- 2026-11-04 (task 53): Investigated creating dashboard users on the Azure App Service. Login is a single plain-text `account_secret` in `user_accounts` (no hashing, roles or disabled flag); no code changed. A stdlib helper (`docs/relay/relay_users.py`) lists, adds, re-secrets and removes accounts through the relay venv's Python with a hidden prompt; steps in `docs/relay/state-database.md`.
+- 2026-11-04 (task 52): The two Azure workflows are replaced by one, `.github/workflows/development_azure.yml`: it builds the dashboard export and deploys dashboard, gateway and relay together as one zip (`dashboard/`, `gateway/`, `relay/`) to `/home/site/wwwroot` (`type: zip`, `clean: true`, `restart: true`, same publish-profile secret, same concurrency group). The old files are in `.github/workflows-backup/`. A push touching any of the three folders now deploys all three (a dashboard-only push restarts the relay). Runtime data in `/home/relay` is outside wwwroot and not touched. The App Service setting `SCM_DO_BUILD_DURING_DEPLOYMENT=false` and `ENABLE_ORYX_BUILD=false` are both required (Oryx was observed replacing the folders with `output.tar.zst`; see `docs/github-actions.md`).
+- 2026-11-04 (task 51): Dashboard deploy failed on Azure with Oryx "Could not detect any platform" because a remote build ran on the static export. The dashboard zip now includes a `.deployment` file with `SCM_DO_BUILD_DURING_DEPLOYMENT=false`; the App Service settings `SCM_DO_BUILD_DURING_DEPLOYMENT=false` and `ENABLE_ORYX_BUILD=false` must be set in the portal (see `docs/github-actions.md`).
+- 2026-11-04 (task 50): New `scripts/mars_abafar_products/seed_mars_product.sql` creates `[dbo].[SEED_MARS_PRODUCT]`, which inserts one random test product (ID given as `@ProductID`) into the MARS tables the script reads, in one transaction. Not run against MARS yet. See `docs/scripts/mars-abafar-products.md`.
+- 2026-11-03 (task 49): The Azure workflows no longer run tests: `development_relay.yml` lost its Python setup and the relay and gateway pytest steps (the zips are unchanged); `development_dashboard.yml` had no test step (its `yarn typecheck` stays). Tests are run locally, see "Running tests locally". See `docs/github-actions.md`.
+- 2026-11-03 (task 48): `scripts/mars_abafar_products/run.py`: the metadata insert filters on `last_id` like the other migrate steps (it was fixed at ID > 20000); new `TESTING = True` at the top keeps the one-product limit (`last_id < ID < last_id + 2`) on the four migrate fetchers, `TESTING = False` fetches everything above `last_id`; a failed insert now rolls back, closes the connection and stops the script instead of being printed and skipped. See `docs/scripts/mars-abafar-products.md`.
+- 2026-11-03 (task 47): GitHub Actions moved off Node.js 20: `actions/checkout` v4 to v5, `actions/setup-node` v4 to v5, `actions/setup-python` v5 to v6, `actions/upload-artifact` v4 to v6, `actions/download-artifact` v4 to v7 (each verified as `using: node24` in its action.yml); `azure/webapps-deploy@v3` was already node24. The dashboard build already pins `node-version: '24.x'`. See `docs/github-actions.md`.
+- 2026-11-03 (task 47): `scripts/mars_abafar_products/run.py`: `fetchLastIDFromAbafar` no longer returns a hardcoded `21320`; it returns the int `max(ID)` of Abafar `PRODUCTS` (previously the unreachable query read `PRODUCT_PRICES`), or `None` on an empty table. The `migrate...` insert steps return `0` when MARS returns no rows instead of raising `IndexError`. See `docs/scripts/mars-abafar-products.md`.
+- 2026-11-03 (task 46): `scripts/mars_abafar_products/run.py` no longer uses the text `'NULL'` for missing values: `SALE_END` (both the new-price and the price-update queries) now returns a real SQL NULL and `HAS_SUBSTITUTE` is the plain `CAST(... AS VARCHAR(20))`, which is NULL when there is no substitute; `queries.sql` matches. Python `None` reaches `executemany` unchanged. Rows already written with the text 'NULL' are not corrected by this change. See `docs/scripts/mars-abafar-products.md`.
+- 2026-11-03 (task 45): The dashboard GitHub Actions workflow (`.github/workflows/development_dashboard.yml`) now runs on a push to `Development` only when `dashboard/**` or the workflow file changed; manual `workflow_dispatch` still works. The relay workflow is unchanged. See `docs/github-actions.md` (Path filters).
+- 2026-11-03 (task 44): `scripts/mars_abafar_products/run.py` update and UPC sync steps reworked: each fetcher now runs a plain `SELECT` on MARS and returns JSON rows; the update functions write them to Abafar with parameterized `UPDATE`s (`executemany`), and the UPC sync deletes then inserts in one transaction. `queries.sql` updated. See `docs/scripts/mars-abafar-products.md`.
 - 2026-11-02 (task 43): `scripts/mars_abafar_products/run.py` finished: fetch and update/sync functions for products, prices, UPCs, metadata and sizes built from the queries in `queries.sql`. Only `syncProductUPCsFromMarsToAbafar` is active in the bottom call block (the rest are commented out). The UPC sync was tested against a fake `pyodbc`. See `docs/scripts/mars-abafar-products.md`.
 - 2026-11-02 (task 42): The run history table `schedule_runs` now cleans itself: `scheduler.log_max_age_days` (default 30) deletes finished runs older than that at relay start and once a day, in small batches, keeping the newest run of each schedule, unfinished runs and undated rows (`relay/src/_scheduler/runlog.py`). Test runs no longer write the real `relay/logs` (`test_shutdown.py` passed no `RELAY_LOG_DIR`; `conftest.py` now sets it for every test). See `relay/README.md`.
 - 2026-11-02 (task 39): Push/login accounts moved from `push_accounts.json` into the state database: `user_accounts (account_secret, name, min_severity)` is edited with plain SQL (`sqlite3 /home/relay/state/relay_state.db "INSERT INTO user_accounts VALUES ('secret', 'Name', 5);"`) and applies on the next login with no restart; the relay writes tokens and push windows to `account_devices` and `account_push_windows`. An existing `push_accounts.json` is imported once (also into databases made by the previous release) and then ignored; `settings.push.accounts_file` is deprecated (import source only). `state_db.py check` prints account counts. The database file is `0600` and now holds the secrets, as do daily copies. See `relay/README.md` "Accounts" and `docs/relay/state-database.md`.

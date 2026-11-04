@@ -1,0 +1,79 @@
+# Relay (relay/) and the public gateway/supervisor (gateway/): deployed as two folders of the one App Service,
+# devmonitoringApp (same azure/webapps-deploy action, slot and publish-profile secret as before). Each folder is
+# replaced on its own through OneDeploy (type zip + target-path); the dashboard folder is left alone.
+# Layout, startup command and App Service settings: docs/github-actions.md
+
+name: Build and deploy Relay + gateway (Python) to Azure Web App - devmonitoringApp
+
+on:
+  push:
+    branches:
+      - 'Development'
+    paths:
+      - 'relay/**'
+      - 'gateway/**'
+      - '.github/workflows/development_relay.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read #This is required for actions/checkout
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Dependencies are not shipped: supervisor.py builds one virtualenv per folder under /home/relay on the server.
+      - name: Package relay and gateway
+        run: |
+          (cd relay && zip -qr ../relay.zip . -x 'tests/*' 'pytest.ini' '.pytest_cache/*' '*__pycache__/*')
+          (cd gateway && zip -qr ../gateway.zip . -x 'tests/*' 'pytest.ini' 'requirements-dev.txt' '.pytest_cache/*' '*__pycache__/*')
+
+      - name: Upload artifact for deployment jobs
+        uses: actions/upload-artifact@v6
+        with:
+          name: relay-app
+          path: |
+            relay.zip
+            gateway.zip
+          if-no-files-found: error
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    # both workflows deploy to the one app: take turns (builds still run in parallel)
+    concurrency:
+      group: azure-deploy-devmonitoringApp
+      cancel-in-progress: false
+
+    steps:
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v7
+        with:
+          name: relay-app
+
+      - name: 'Deploy gateway to Azure Web App'
+        uses: azure/webapps-deploy@v3
+        id: deploy-gateway
+        with:
+          app-name: 'devmonitoringApp'
+          slot-name: 'Production'
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_21FA5A948323482DA2875B8A95BDD27D }}
+          package: gateway.zip
+          type: zip
+          target-path: /home/site/wwwroot/gateway
+          restart: false
+
+      # Last deployment of the run: restarts the app so supervisor.py starts the new gateway and relay.
+      - name: 'Deploy relay to Azure Web App'
+        uses: azure/webapps-deploy@v3
+        id: deploy-relay
+        with:
+          app-name: 'devmonitoringApp'
+          slot-name: 'Production'
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_21FA5A948323482DA2875B8A95BDD27D }}
+          package: relay.zip
+          type: zip
+          target-path: /home/site/wwwroot/relay
+          restart: true

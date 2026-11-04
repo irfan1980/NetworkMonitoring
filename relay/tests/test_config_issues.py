@@ -42,9 +42,15 @@ def test_no_issues_on_a_clean_minimal_config(config_dict):
     assert compute_config_issues(RelayConfig.model_validate(config_dict)) == []
 
 
-def test_server_with_no_used_buses_is_flagged(config_dict):
+def test_server_with_no_used_buses_and_no_bus_configured_is_not_flagged(config_dict):
     config_dict["machines"][0]["nodes"] = [_database_node("n1", 1001)]
-    assert "server_unused_by_any_bus" in _codes(config_dict)
+    assert _codes(config_dict) == set()
+
+
+def test_server_with_no_used_buses_while_a_bus_exists_is_not_flagged(config_dict):
+    config_dict["service_busses"] = [_bus(1)]
+    config_dict["machines"][0]["nodes"] = [_database_node("n1", 1001)]
+    assert "server_unused_by_any_bus" not in _codes(config_dict)
 
 
 def test_bus_not_referenced_by_any_server_is_flagged(config_dict):
@@ -91,7 +97,6 @@ def test_issue_ordering_is_servers_then_buses_then_machines_then_alerts(config_d
     config = RelayConfig.model_validate(config_dict)
     codes = [issue.code for issue in compute_config_issues(config)]
     assert codes == [
-        "server_unused_by_any_bus",
         "service_bus_unused_by_any_server",
         "object_severity_out_of_range",
     ]
